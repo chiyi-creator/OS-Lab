@@ -1280,9 +1280,9 @@ make
 make qemu
 ```
 
-本次 `make` 输出 `Nothing to be done for 'TARGETS'`，表示按当前构建规则无需更新目标文件。随后使用已有内核镜像运行。因此，图5.2-2记录的是构建状态检查与运行结果，不能将其表述为全部源文件重新编译的过程。
+本次 `make` 输出 `Nothing to be done for 'TARGETS'`，表示按当前构建规则无需更新目标文件。随后使用已有内核镜像运行。
 
-沿用课程原始 Makefile，`qemu` 和 `debug` 目标使用 `-bios default`，并通过 `-device loader,file=$(UCOREIMG),addr=0x80200000` 加载内核镜像。图5.2-2显示 QEMU 4.1.1、OpenSBI v0.4、Runtime SBI Version 0.1，以及末尾的 `(THU.CST) os is loading ...`。启动消息输出后，当前内核进入无限循环，不提供交互式 shell。
+用课程原始 Makefile，`qemu` 和 `debug` 目标使用 `-bios default`，并通过 `-device loader,file=$(UCOREIMG),addr=0x80200000` 加载内核镜像。图5.2-2显示 QEMU 4.1.1、OpenSBI v0.4、Runtime SBI Version 0.1，以及末尾的 `(THU.CST) os is loading ...`。启动消息输出后，当前内核进入无限循环，不提供交互式 shell。
 
 ![QEMU 4.1.1 配合课程原始启动参数运行成功](./images/boot-success-qemu411.png)
 
