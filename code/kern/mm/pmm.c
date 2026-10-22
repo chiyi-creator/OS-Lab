@@ -1,5 +1,6 @@
 #include <default_pmm.h>
 #include <best_fit_pmm.h>
+#include <buddy_pmm.h>
 #include <defs.h>
 #include <error.h>
 #include <memlayout.h>
@@ -34,7 +35,13 @@ static void check_alloc_page(void);
 
 // init_pmm_manager - initialize a pmm_manager instance
 static void init_pmm_manager(void) {
+#if defined(PMM_BUDDY)
+    pmm_manager = &buddy_pmm_manager;
+#elif defined(PMM_FIRST_FIT)
     pmm_manager = &default_pmm_manager;
+#else
+    pmm_manager = &best_fit_pmm_manager;
+#endif
     cprintf("memory management: %s\n", pmm_manager->name);
     pmm_manager->init();
 }
@@ -62,6 +69,43 @@ size_t nr_free_pages(void) {
 }
 
 //lab2 function1 YOUR CODE
+// Integration dependency: discover RAM before running any allocator.
+static void page_init(void) {
+    extern char end[];
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
+    if (mem_base != DRAM_BASE || mem_size == 0 ||
+        mem_base + mem_size < mem_base) {
+        panic("page_init: invalid DTB memory range");
+    }
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+    uint64_t mem_end = mem_base + mem_size;
+    uintptr_t maxpa = ROUNDDOWN(
+        mem_end < PHYSICAL_MEMORY_END ? mem_end : PHYSICAL_MEMORY_END, PGSIZE);
+    if (maxpa <= KERNEL_BEGIN_PADDR) {
+        panic("page_init: RAM does not contain the kernel");
+    }
+    npage = maxpa / PGSIZE;
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+    uintptr_t desc_pa = (uintptr_t)pages - va_pa_offset;
+    size_t desc_bytes = (npage - nbase) * sizeof(struct Page);
+    if (desc_pa >= maxpa || desc_bytes > maxpa - desc_pa) {
+        panic("page_init: insufficient RAM for Page descriptors");
+    }
+    for (size_t i = 0; i < npage - nbase; i++) {
+        pages[i].flags = pages[i].property = 0;
+        set_page_ref(&pages[i], 0);
+        SetPageReserved(&pages[i]);
+    }
+    uintptr_t freemem = ROUNDUP(desc_pa + desc_bytes, PGSIZE);
+    cprintf("physical memory: [0x%08lx, 0x%08lx)\n", mem_base, maxpa);
+    cprintf("Page descriptors: [0x%08lx, 0x%08lx)\n",
+            desc_pa, desc_pa + desc_bytes);
+    if (freemem < maxpa) {
+        init_memmap(pa2page(freemem), (maxpa - freemem) / PGSIZE);
+    }
+    cprintf("initial free pages: %lu\n", nr_free_pages());
+}
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {

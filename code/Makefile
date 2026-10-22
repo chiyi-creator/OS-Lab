@@ -6,11 +6,11 @@ SLASH	:= /
 V       := @
 
 #ifndef GCCPREFIX
-GCCPREFIX := riscv64-unknown-elf-
+GCCPREFIX ?= $(if $(wildcard $(HOME)/riscv-elf-toolchains/bin/riscv64-unknown-elf-gcc),$(HOME)/riscv-elf-toolchains/bin/riscv64-unknown-elf-,riscv64-unknown-elf-)
 #endif
 
 ifndef QEMU
-QEMU := qemu-system-riscv64
+QEMU := $(if $(wildcard $(HOME)/lab1-tools/qemu-4.1.1/riscv64-softmmu/qemu-system-riscv64),$(HOME)/lab1-tools/qemu-4.1.1/riscv64-softmmu/qemu-system-riscv64,qemu-system-riscv64)
 endif
 
 ifndef SPIKE
@@ -27,13 +27,24 @@ endif
 HOSTCC		:= gcc
 HOSTCFLAGS	:= -Wall -O2
 
-GDB		:= $(GCCPREFIX)gdb
+GDB		?= $(GCCPREFIX)gdb
 
 CC		:= $(GCCPREFIX)gcc
 CFLAGS  := -mcmodel=medany -std=gnu99 -Wno-unused -Werror 
 CFLAGS	+= -fno-builtin -Wall -O2 -nostdinc $(DEFS)
 CFLAGS	+= -fno-stack-protector -ffunction-sections -fdata-sections
-CFLAGS	+= -g
+CFLAGS	+= -g -march=rv64imac_zicsr_zifencei -mabi=lp64 -fno-pie
+PMM ?= best_fit
+ifeq ($(PMM),buddy)
+CFLAGS += -DPMM_BUDDY
+else ifeq ($(PMM),first_fit)
+CFLAGS += -DPMM_FIRST_FIT
+else ifneq ($(PMM),best_fit)
+$(error PMM must be best_fit, first_fit or buddy)
+endif
+ifeq ($(MMU_PROBE),1)
+CFLAGS += -DLAB2_MMU_PROBE
+endif
 CFLAGS2 = $(CFLAGS) -D ucore_test
 CTYPE	:= c S
 LD      := $(GCCPREFIX)ld
@@ -53,8 +64,8 @@ SH		:= sh
 TR		:= tr
 TOUCH	:= touch -c
 
-OBJDIR	:= obj
-BINDIR	:= bin
+OBJDIR	:= obj/$(PMM)$(if $(filter 1,$(MMU_PROBE)),-probe,)
+BINDIR	:= bin/$(PMM)$(if $(filter 1,$(MMU_PROBE)),-probe,)
 
 ALLOBJS	:=
 ALLDEPS	:=
@@ -176,8 +187,8 @@ debug: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 		-s -S
 
 gdb:
-	riscv64-unknown-elf-gdb \
-    -ex 'file bin/kernel' \
+	$(GDB) \
+    -ex 'file $(BINDIR)/kernel' \
     -ex 'set arch riscv:rv64' \
     -ex 'target remote localhost:1234'
 

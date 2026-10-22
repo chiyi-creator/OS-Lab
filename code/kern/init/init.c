@@ -39,6 +39,11 @@ int kern_init(void) {
     // grade_backtrace();
     pmm_init();  // init physical memory management
 
+#ifdef LAB2_MMU_PROBE
+    extern void lab2_mmu_probe(void);
+    lab2_mmu_probe();
+#endif
+
     /* do nothing */
     while (1)
         ;
