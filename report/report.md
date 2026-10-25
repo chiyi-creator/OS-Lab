@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 |------|------|
 | **实验名称** | 操作系统实验二：物理内存和页表 |
-| **小组成员** | 2413669-张懿鸾（1号）、2412419—张祎然（2号）、2413788-张旗庭|
+| **小组成员** | 2413669-张懿鸾（1号）、2412419—张祎然（2号）、2413788-张旗庭（3号）|
 | **完成日期** | 2026-10-24 |
 
 ### 小组分工
@@ -59,9 +59,9 @@
 
 | 成员 | AI 编程工具/使用入口 | 底层模型及版本 | 主要用途 |
 |------|--------------------|----------------|----------|
-| 2413669-张懿鸾 |  Codex（VS Code）+ ChatGPT | Codex 使用 DeepSeek 后端（Deepseek-Flash）| [待填写] |
+| 2413669-张懿鸾 | Codex（VS Code）+ ChatGPT | Codex 使用 DeepSeek 后端（Deepseek-Flash） | 辅助分析实验要求与项目源码，完成物理内存初始化和 Best-Fit 分配算法的设计与实现；辅助代码审查、编译验证、QEMU/GDB 调试及页表查询和 TLB 机制分析|
 |2412419-张祎然 | Codex 桌面应用 | `gpt-6.1-sol` | 分步讲解 First-Fit 与 Buddy，辅助实现纠错和测试，并协助双 GDB 页表/TLB 调试、Bare 模式对照及记录整理。|
-| 学号3-姓名3 | [待填写] | [待填写] | [待填写] |
+| 2413788-张旗庭| Codex（VS Code）+ ChatGPT| ChatGPT：GPT-6  |SLUB 内存对象分配模块的设计与代码生成、测试模块编写及排错；辅助理解 QEMU 源码，制定双 GDB 调试步骤，分析 Sv39 页表遍历、物理地址计算和软件 TLB 填充过程，并整理实验报告。 |
 
 ---
 
@@ -1057,11 +1057,11 @@ size_t buddy_ppn = base_ppn ^ block_pages;
 本实现主要定义两个数据结构：`struct slub_cache` 和 `struct slub_page`。
 
 ```c
-struct slub_cache { 
+struct slub_cache {
     size_t object_size; // 管理的对象槽大小
     list_entry_t slabs;
 };
-struct slub_page { 
+struct slub_page {
     list_entry_t link;  // 把当前 slab 加入 cache 链表
     struct slub_cache *cache;
     struct Page *page;
@@ -1181,9 +1181,9 @@ slub_alloc(size_t size) {
 
     struct slub_page *slab = NULL;
     list_entry_t *le;
-    for (le = list_next(&cache->slabs); le != &cache->slabs; 
+    for (le = list_next(&cache->slabs); le != &cache->slabs;
          le = list_next(le)) {
-        struct slub_page *candidate = to_struct(le, struct slub_page, link);  // 通过链表节点，找回它所属的 slub_page 结构体 
+        struct slub_page *candidate = to_struct(le, struct slub_page, link);  // 通过链表节点，找回它所属的 slub_page 结构体
         if (candidate->inuse < candidate->capacity) {
             slab = candidate;
             break;
@@ -1244,7 +1244,7 @@ slub_free(void *ptr) {
 
     for (size_t i = 0; i < SLUB_CACHE_COUNT && slab == NULL; i++) {// 遍历所有cache，确认页面属于SLUB
         list_entry_t *head = &caches[i].slabs;
-        for (list_entry_t *le = list_next(head); le != head; 
+        for (list_entry_t *le = list_next(head); le != head;
              le = list_next(le)) {// 内层循环遍历每个cache管理的slab链表
             struct slub_page *candidate =
                 to_struct(le, struct slub_page, link);
@@ -2701,6 +2701,14 @@ get_page_addr_code()         //查询取指地址的缓存映射；未命中时�
 
 #### 3号成员：张旗庭 2413788
 
+通过本次实验，我对**物理页管理、对象分配和虚拟内存映射**之间的关系有了更清楚的认识。Best-Fit、Buddy 等物理页分配器负责管理物理页面；本次实现的简化 SLUB 在获得物理页后，进一步将页内空间划分为不同尺寸的对象槽；页表与 TLB 则解决 CPU 使用虚拟地址访问内存时的地址转换问题。这些机制分工不同，但共同支持内核的内存管理。
+
+对于 Sv39，我原先主要理解为“三级页表”，实际调试后认识到，**三级代表最大遍历深度，不代表每次一定遍历三级**。本次根层 PTE 就是 1 GiB 大页叶子项，因此只需一次 PTE 读取即可确定映射。
+
+对于 TLB，QEMU 中的软件 TLB 是用软件模拟地址翻译缓存，与真实 CPU 的硬件 TLB 在作用上相似，但实现位置和维护方式不同。通过查看 Bare 和 Sv39 的不同分支，也进一步区分了“地址直接使用”和“按页表转换”两种路径。
+
+本实验还有一些重要但未深入实现的操作系统机制，例如进程地址空间隔离、缺页异常、实际 Linux SLUB 的更复杂管理策略等。
+
 ### 6.2 AI 协作开发的经验
 
 #### 1号成员：张懿鸾 2413669
@@ -2713,3 +2721,9 @@ get_page_addr_code()         //查询取指地址的缓存映射；未命中时�
 这次对提示词的一个体会是，先明确接口和约束，再讨论实现。把“整块释放”“使用绝对物理页号”“失败后状态不变”等条件写清楚，代码和测试才不容易采用不同的假设。报告中的结果以保存的编译、运行和调试记录为依据，完整问答见 [prompt.md](prompt.md)。
 
 #### 3号成员：张旗庭 2413788
+
+本次使用 AI 主要完成两类工作：一是辅助设计 SLUB 模块与测试方案；二是辅助阅读 QEMU 源码、制定双 GDB 调试步骤并分析异常结果。SLUB 的两份完整生成提示词及其设计约束已记录在 **4.5.3**。
+
+在写SLUB及其测试模块的时候，虽然大模型写的很快，也能得到一个有效的模块，但是其中仍然存在一些问题，比如分的cache类别比较少。这些都是后续还可以优化的部分。虽然大模型显著提高了初版代码的生成效率，但是依旧不能替代开发者对代码逻辑和运行结果的判断。
+
+GDB调试中，AI对我帮助最大的是将较大的调试任务拆解为可验证的小步骤。刚开始面对三个终端，两个层面的调试，遇到了许多困难。有了AI的指导和自己动手看调试结果，这个分支任务得以顺利完成，也真实地看到内存访问的步骤，对于内存管理的理解也更深了。
