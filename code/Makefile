@@ -44,6 +44,12 @@ CFLAGS += -DPMM_FIRST_FIT
 else ifneq ($(PMM),best_fit)
 $(error PMM must be best_fit, first_fit or buddy)
 endif
+
+# Enable the SLUB runtime self-test only when requested.
+ifeq ($(SLUB_TEST),1)
+CFLAGS += -DSLUB_TEST
+endif
+
 CFLAGS2 = $(CFLAGS) -D ucore_test
 CTYPE	:= c S
 LD      := $(GCCPREFIX)ld
