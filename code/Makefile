@@ -50,6 +50,11 @@ ifeq ($(SLUB_TEST),1)
 CFLAGS += -DSLUB_TEST
 endif
 
+# Enable optional MMU probe.
+ifeq ($(MMU_PROBE),1)
+CFLAGS += -DLAB2_MMU_PROBE
+endif
+
 CFLAGS2 = $(CFLAGS) -D ucore_test
 CTYPE	:= c S
 LD      := $(GCCPREFIX)ld
@@ -69,8 +74,8 @@ SH		:= sh
 TR		:= tr
 TOUCH	:= touch -c
 
-OBJDIR := obj/$(PMM)
-BINDIR := bin/$(PMM)
+OBJDIR := obj/$(PMM)$(if $(filter 1,$(MMU_PROBE)),-probe,)
+BINDIR := bin/$(PMM)$(if $(filter 1,$(MMU_PROBE)),-probe,)
 
 ALLOBJS	:=
 ALLDEPS	:=
@@ -193,7 +198,7 @@ debug: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 
 gdb:
 	riscv64-unknown-elf-gdb \
-    -ex 'file bin/kernel' \
+    -ex 'file $(BINDIR)/kernel' \
     -ex 'set arch riscv:rv64' \
     -ex 'target remote localhost:1234'
 
