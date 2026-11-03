@@ -798,3 +798,559 @@ void exception_handler(struct trapframe *tf);
 更推荐放在 [trap.c](./code/kern/trap/trap.c:83) 的 `//lab3 function2` 下方、`trap_dispatch()` 上方；放进 `trap.h` 也可以，但这两个函数目前只在该模块内部使用，不是必须暴露到头文件。
 
 目前这两个函数既没有声明也没有定义，所以完整构建会报隐式声明错误。你需要做的是把这一要求明确交接给队友；只有队友补上函数定义，或者至少先补上函数声明，完整内核才能继续编译。你的 `RESTORE_ALL` 和 `__alltraps` 已经不需要为此改动。
+
+
+---
+
+## 2412419 张祎然（2号，成员 C）：中断处理
+
+我负责 `kern/trap/trap.c` 中的中断处理模块。开发分工中的“成员 C”和报告中的“2号”都指本人。
+
+## 1. 确认任务范围
+
+**我：** 我负责成员 C 的中断处理，这部分代码由我自己编写。请先讲清已有接口和模块要求，提供基础框架即可，写好后再帮我检查。功能包括中断原因识别、持续时钟、计数与输出、达到次数后关机，以及其他中断提示。修改限定在 `trap.c` 中我的标记区域，保留原有接口、宏定义、结构体和测试，不改其他成员的部分。
+
+**AI：** 本模块接收已经保存好的 TrapFrame，识别原因并完成处理，随后返回公共恢复路径。实现入口是 `interrupt_handler()`，需要用到时钟、打印和关机接口。时钟是否持续触发、计数与返回地址是否正确，可以通过运行和 GDB 检查；其他分支可以构造输入，核对输出和状态变化。
+
+**我：** `RESTORE_ALL`、`__alltraps` 和异常处理由另外两位同学负责，我可以读它们的接口，但不改实现。另外，这次只排除 `CHALLENGE 1` 对应的 `lab3_switch_test()`，中断处理的基础要求都要保留。
+
+**AI：** 那正式改动就集中在你的中断处理区域。涉及其他模块的依赖问题，先确认接口和当前完成情况，再安排独立测试。
+
+## 2. 确认输入和依赖
+
+**我：** 我打开了 `trap.c`，还不清楚 `tf` 从哪里来。请先根据与中断处理直接相关的定义，说明输入、调用关系和返回过程。
+
+**AI：** `trap.h` 中的 `struct trapframe` 定义了 `cause`、`epc` 等字段。汇编入口保存现场后，将地址传给 `trap()`，再由 `trap_dispatch()` 分发到中断或异常处理函数。中断处理结束后，经调用者返回 `__trapret`，恢复寄存器并执行 `sret`。
+
+**我：** 那我需要提供哪些代码，才能把自己的模块写完整？
+
+**AI：** 先看下面这些定义和接口即可。遇到编译或启动问题时，再根据报错位置补充相关代码。
+
+| 需要了解的内容 | 相关文件 | 用途 |
+|----------------|----------|------|
+| TrapFrame 字段和数据宽度 | `trap.h`、`defs.h` | 读取原因码和返回地址 |
+| 分发、统计输出和现场打印 | `trap.c` | 保持调用关系和原有输出格式 |
+| 中断原因号 | `riscv.h` | 与已有 `IRQ_*` 常量对应 |
+| 共享计数和下一次时钟事件 | `clock.h`、`clock.c` | 更新 `ticks`，维持时钟触发 |
+| 定时与关机接口 | `sbi.h`、`sbi.c` | 使用现有固件服务封装 |
+
+## 3. 判断编辑器提示
+
+**我：** `clock.c` 里的 `set_csr(sie, MIP_STIP)` 被标红了。这个文件是公共驱动，先不要改，帮我判断是代码问题还是编辑器没有识别出来。
+
+**AI：** `sie` 在这里是 `set_csr` 宏使用的 CSR 名称。先查看 `riscv.h` 中的宏定义，并核对编辑器是否按 RISC-V 工具链解析项目。编辑器标红不一定对应编译错误，要以交叉编译器的输出为准。
+
+## 4. 原因码与返回地址
+
+**我：** 中断模块要根据 `tf->cause` 区分类型，还要保持原程序能够继续执行。请说明原因码里哪些位参与分类，以及处理结束后哪些现场不能改。
+
+**AI：** 当前目标是 RV64，最高位表示是否为中断，其余位表示具体原因。例如 `0x8000000000000005` 对应 Supervisor 时钟中断。分类时可以使用去掉最高位后的局部值，原始 `tf->cause` 留在 TrapFrame 中。
+
+**我：** 时钟处理后，`epc` 要像某些异常那样向后调整吗？
+
+**AI：** 时钟打断的是正常执行过程，`epc` 应保持不变。需要跳过断点或非法指令的情况由异常处理模块负责。你的函数也不应改写 TrapFrame 中的其他寄存器现场。
+
+## 5. 基础框架和检查条件
+
+**我：** 请给出保留原有接口的基础框架，函数体先留空，由我自己填写。再说明输入、依赖和各分支需要达到的结果，我写好后贴出来检查。
+
+**AI：** 先保留函数入口，下面的框架还没有实现处理逻辑：
+
+```c
+void interrupt_handler(struct trapframe *tf) {
+    /* TODO: 补充中断处理逻辑 */
+}
+```
+
+接口保留外部链接属性，输入是已有入口保存的有效 TrapFrame。需要辅助函数时，由你在本人标记区域内编写，作为私有实现。填写后可以按下面几种情况检查。
+
+| 情况 | 应有的处理结果 | 检查方法 |
+|------|----------------|----------|
+| Supervisor 时钟中断 | 重设下一次事件，`ticks` 恰好增加一次 | 跟踪调用并比较入口、返回处的计数 |
+| 达到输出间隔 | 调用原有统计函数输出一次，保留累计计数 | 检查输出条件和相邻计数位置 |
+| 达到结束次数 | 完成最后一次输出后关机 | 统计输出行数，读取 QEMU 退出状态 |
+| 其他已知类型 | 输出对应提示，不更新时钟状态 | 构造原因值，比较提示和状态 |
+| 未知原因 | 输出原因号和 TrapFrame，正常返回 | 构造未知原因，检查现场输出 |
+
+**我：** 现有的 `ticks`、`TICK_NUM` 和打印函数都继续使用，不再另建一套计数或输出。代码中的实验标记用我的学号2412419。
+
+**AI：** 可以。检查实现时还要确认没有修改公共分发、异常处理、寄存器布局和原有测试断言。
+
+## 6. 检查原因码分类
+
+**我：** 现在原因分类使用了下面的表达式。请根据 RV64 类型定义检查它是否会正确识别中断，同时保留原始现场。
+
+```c
+uintptr_t cause = tf->cause & ~((uintptr_t)1 << 63);
+```
+
+**AI：** 这里先把1转换成 `uintptr_t` 再左移，避免按普通32位整数做63位移位。取反后与原值按位与，得到不含最高标志位的原因号。结果存入局部变量 `cause`，不会改动 `tf->cause` 或 `tf->epc`。
+
+**我：** 以 `0x8000000000000005` 为输入，后面的分支就应该收到原因号5。
+
+**AI：** 对。可以用这个例子检查真实时钟入口，再用软件中断和未知原因检查其他分支。
+
+## 7. 检查时钟事件与共享计数
+
+**我：** 时钟模块需要持续触发，每次处理后共享计数只能增加一次。这部分实现如下，请结合 `clock.c` 和 `clock.h` 检查调用和计数是否合适。
+
+```c
+clock_set_next_event();
+ticks++;
+```
+
+**AI：** `clock_set_next_event()` 安排的是一次后续事件，所以每次进入时钟分支都需要调用。这里随后更新已有的 `ticks`，顺序与当前框架一致。这两项操作应在每次时钟中断时执行，输出频率再单独控制。
+
+**我：** 也就是持续触发和计数不能依赖是否到了打印时间，`ticks` 也不应在函数里重新初始化。
+
+## 8. 检查周期输出
+
+**我：** `TICK_NUM` 是100。我需要每处理100次时钟中断输出一次，其他次数继续计数，输出后不能清零。请检查当前这段代码是否符合要求。
+
+```c
+case IRQ_S_TIMER:
+    clock_set_next_event();
+    ticks++;
+    if (ticks % TICK_NUM == 0) {
+        print_ticks();
+    }
+    break;
+```
+
+**AI：** 按这段代码，计数由99变为100时会输出一次，100变为101时不会输出，199变为200时再次输出。判断放在递增之后，初始的0不会造成额外输出。`break` 使时钟分支结束后退出 `switch`。
+
+**我：** 这些边界可以在测试时单独观察。我还要检查其他分支不会误改时钟计数。
+
+## 9. 检查其他中断分支
+
+**我：** 除 Supervisor 时钟外，其他已知中断只需要按类型提示，未知原因还要打印现场。它们都应保持计数和返回地址不变。请对照 `IRQ_*` 定义检查下面这些分支。
+
+```c
+case IRQ_U_SOFT:
+    cprintf("User software interrupt\n");
+    break;
+
+case IRQ_S_SOFT:
+    cprintf("Supervisor software interrupt\n");
+    break;
+
+case IRQ_M_SOFT:
+    cprintf("Machine software interrupt\n");
+    break;
+
+case IRQ_U_TIMER:
+    cprintf("User timer interrupt\n");
+    break;
+
+case IRQ_M_TIMER:
+    cprintf("Machine timer interrupt\n");
+    break;
+
+case IRQ_U_EXT:
+    cprintf("User external interrupt\n");
+    break;
+
+case IRQ_S_EXT:
+    cprintf("Supervisor external interrupt\n");
+    break;
+
+case IRQ_M_EXT:
+    cprintf("Machine external interrupt\n");
+    break;
+```
+
+**AI：** 八个分支分别对应三个级别的软件中断、另外两个级别的时钟中断，以及三个级别的外部中断，类型与提示一致。它们没有更新 `ticks`，也没有调用时钟重设接口。
+
+**我：** 未知原因的处理是这两句，请一起检查输出内容和接口是否匹配。
+
+```c
+cprintf("Unknown interrupt: cause %lu\n", (unsigned long)cause);
+print_trapframe(tf);
+```
+
+**AI：** `%lu` 与转换后的 `unsigned long` 参数匹配。原因号之外，`print_trapframe(tf)` 会打印原始现场，便于定位。检查整个函数时，还要确认每个分支能够结束，且计数操作只出现在 Supervisor 时钟分支中。
+
+**我：** 我先保存这一版，进行编译和运行检查。
+
+## 10. 分清源码和命令的输入位置
+
+**我：** 终端里执行 `wsl -d Ubuntu-22.04` 提示没有这个命令，粘贴代码后又报 `cprintf` 和 `break` 错误。先帮我判断是不是输入位置弄错了。
+
+**AI：** 提示符已经是 Ubuntu 用户和 `/mnt/d/...` 路径，说明当前就在 WSL 内。这里输入 Linux 命令即可。`cprintf`、`case` 和 `break` 是 C 代码，应该写进编辑器中的 `trap.c`，Bash 会把它们当成命令，所以报错。
+
+**我：** 后面把源码、终端命令和 GDB 命令分开给我。我执行后再反馈输出。
+
+**AI：** 编译和运行命令放在 Bash；出现 `(gdb)` 后再输入调试命令。用于核对的预期输出不用再次输入。
+
+## 11. 独立编译
+
+**我：** 我的中断处理已经写进 `trap.c`，但3号的异常处理还没有合进来。请给出只检查当前代码的编译方法，保留公共接口和编译警告，不修改对方的函数。
+
+**AI：** 可以在 `/tmp` 中准备临时声明头，声明 `struct trapframe` 和 `exception_handler()`，通过 `-include` 引入，再用 `-c` 单独编译 `kern/trap/trap.c`。目标文件也放在 `/tmp`，无需改动公共头文件。
+
+**我：** 执行后显示“C部分编译检查通过”。
+
+**AI：** 说明当前代码通过了这次编译检查。`-c` 不进行完整链接，声明也不等于异常函数已经实现；下一步还需要构建测试内核运行时钟。
+
+对应记录：[图 C1：独立编译结果](images/member2/c01-compile-check.png)。
+
+## 12. 构建测试内核
+
+**我：** 完整链接还依赖异常处理。请把测试准备放在独立副本里，正式源码只保留我的中断实现。另外，现在构建报 `unknown CSR 'sbadaddr'`，先定位这个错误，不要直接改公共汇编。
+
+**AI：** 使用 `/tmp/lab3-c-test.AXvPFB` 作为测试副本，注入框架时钟测试并启用 `GRADE_LAB3_TIMER`。临时异常函数只用于满足链接，意外进入时打印现场并停止。临时 C 声明要排除汇编预处理场景。
+
+**我：** 报错位置是 `trapentry.S:47`，读取的 CSR 名称为 `sbadaddr`。
+
+**AI：** 当前汇编器不识别这个旧名称。可以在测试构建参数中加入 `-Dsbadaddr=stval`，由 `.S` 预处理完成名称替换，保留汇编源码。构建成功后应生成 `bin/kernel` 和 `bin/ucore.img`。
+
+**我：** 加上参数后显示“时钟测试内核构建成功”。使用的关键参数如下：
+
+```text
+-DGRADE_LAB3_TIMER
+-include /tmp/lab3-c-test.AXvPFB/c_only_declarations.h
+-Dsbadaddr=stval
+```
+
+对应记录：[图 C2：CSR 报错](images/member2/c02-csr-build-error.png)、[图 C3：构建成功](images/member2/c03-csr-build-success.png)。
+
+## 13. 核对实际运行的 QEMU
+
+**我：** 现在只有固件输出，没有内核的时钟信息。我预期使用的是 QEMU 4.1.1，请先检查实际调用路径和版本，再判断启动代码是否有问题。
+
+**AI：** 用 `type -a qemu-system-riscv64` 和版本输出确认。当前结果显示，默认路径为 `/opt/qemu/bin/qemu-system-riscv64`，版本是7.0.0，本机还有4.1.1的安装目录。
+
+**我：** GDB 里 `scause = 0xc`，`sepc` 和 `stval` 都是 `0x80200038`，没有停到 `kern_init()`。
+
+**AI：** 这是启动阶段的取指缺页，此时还没有进入中断处理函数。先用已安装的4.1.1和原启动代码重新运行，再根据结果决定下一步。这个现场本身还不能说明 QEMU 7 或你的 handler 有错误。
+
+后续运行使用的路径为：
+
+```text
+/home/zhangyiran/lab1-tools/qemu-4.1.1-install/bin/qemu-system-riscv64
+```
+
+对应记录：[图 C4：版本与路径](images/member2/c04-qemu-version-paths.png)、[图 C5：启动异常现场](images/member2/c05-boot-page-fault.png)。
+
+## 14. 持续时钟测试通过后的检查
+
+**我：** 换成 QEMU 4 后，出现了连续的 `100 ticks` 和 `Test 3 ... PASS (40/40, ticks=200)`。请结合中断模块的完整要求，看看还要检查哪些地方。
+
+**AI：** 这说明持续时钟测试已经得到预期输出。还需要确认进入 handler 时的真实原因码、重设接口的调用、计数和返回地址的变化，以及其他分支和最后的关机条件。
+
+**我：** 接下来用 GDB 检查这些行为。测试仍在独立副本中进行，符号也加载这个副本的 `bin/kernel`。
+
+该次持续运行的日志为 [timer-qemu4.log](C_2412419/evidence/timer-qemu4.log)，其中尚未包含最终关机验证。
+
+## 15. 观察真实中断入口
+
+**我：** 我要确认收到的确实是 Supervisor 时钟中断，并保存计数和返回地址作为比较起点。GDB 应该停在哪里、查看哪些值？
+
+**AI：** 在 `interrupt_handler` 入口设置硬件断点，第一次命中后读取 `tf->cause`、`ticks` 和 `tf->epc`。按函数符号设置断点，地址以本次运行读取的值为准。
+
+```gdb
+hbreak interrupt_handler
+continue
+p/x tf->cause
+p ticks
+p/x tf->epc
+```
+
+**我：** 原因码是 `0x8000000000000005`，`ticks` 是0，`epc` 是 `0xffffffffc0201a18`。
+
+**AI：** 原因码符合 Supervisor 时钟中断。入口还没有执行计数更新，所以此时为0。保存当前 `tf` 和 `epc`，之后就能比较同一次处理前后的状态。
+
+对应记录：[图 C6：首次入口现场](images/member2/c06-timer-handler-entry.png)。
+
+## 16. 跟踪时钟重设调用
+
+**我：** 现在需要确认下一次事件是由本次中断处理安排的，而不只是初始化时调用过。请给出能检查调用来源和定时参数的调试步骤。
+
+**AI：** 先保存入口的 `tf` 和 `epc`，再分别停在 `clock_set_next_event()` 和 `sbi_set_timer()`，查看调用栈、参数和计数。
+
+```gdb
+set $c_tf = tf
+set $c_epc = tf->epc
+thbreak clock_set_next_event
+continue
+bt 4
+thbreak sbi_set_timer
+continue
+info args
+p ticks
+```
+
+**我：** 调用栈里有 `interrupt_handler()` 和 `__alltraps`。到 `sbi_set_timer()` 时，`stime_value = 447943`，`ticks` 还是0。
+
+**AI：** 这次调用来自 handler，并且发生在计数递增之前。447943是本次设置的绝对触发时间，间隔由 `get_cycles() + timebase` 中的配置决定。
+
+**我：** GDB 还显示了 `<optimized out>` 和 `frame did not save the PC`，这会影响判断吗？
+
+**AI：** 前者与优化编译有关，后者表示 GDB 无法继续按普通调用帧展开这段汇编。可以使用入口保存的指针，在 `__trapret` 直接比较现场，再观察下一次中断是否到达。
+
+对应记录：[图 C7：重设调用链和实参](images/member2/c07-timer-rearm-call.png)。
+
+## 17. 检查计数和返回地址
+
+**我：** 我需要核对一次处理只增加一次计数，而且返回地址没有改变。请让比较发生在同一次中断的入口和返回处，避免把两次中断的值混在一起。
+
+**AI：** 在 `__trapret` 设置临时断点，用入口保存的 `$c_tf` 和 `$c_epc` 做比较，然后继续到下一次 handler。
+
+```gdb
+thbreak __trapret
+continue
+p ticks
+p/x $c_tf->epc
+p $c_tf->epc == $c_epc
+continue
+p/x tf->cause
+p ticks
+```
+
+**我：** 返回处 `ticks = 1`，`epc` 的比较结果为1。继续执行后再次进入 handler，原因码仍是 `0x8000000000000005`，这时 `ticks` 是1。
+
+**AI：** 这次计数从0变为1，保存的返回位置未变，下一次时钟也成功到达。这里检查的是时钟路径和返回地址，全部通用寄存器的恢复还需要单独的上下文测试。
+
+对应记录：[图 C8：返回前后比较与再次进入](images/member2/c08-timer-return-and-repeat.png)。
+
+## 18. 检查软件中断和未知原因
+
+**我：** 其他分支应输出对应提示，并保持时钟计数和返回地址不变。请设计函数输入检查。我可以用 GDB 改原因码，但需要分清它和真实硬件触发的区别。
+
+**AI：** 可以在已经进入 `interrupt_handler()`、尚未读取原因码时，保存 `tf`、`cause`、`epc` 和 `ticks`，再临时替换输入。Supervisor 软件中断使用 `0x8000000000000001`，检查返回处的状态和控制台输出，之后恢复原因值。
+
+**我：** 控制台输出了 `Supervisor software interrupt`，计数和 `epc` 的相等比较都返回1。
+
+**AI：** 提示和状态符合预期。这次改变的是函数输入，没有设置硬件的软件中断挂起位。
+
+**我：** 未知原因设为15后，输出了 `Unknown interrupt: cause 15` 和 TrapFrame，两个比较也是1，最后恢复了原值。
+
+**AI：** 这检查了 `default` 分支。15没有最高中断标志位，但修改时已经进入 handler，因此不涉及公共分发如何判断真实 `scause=15`。另外，这次替换了时钟原因，时钟分支没有重设下一次事件，最终持续运行测试需要重新启动。
+
+**我：** 现场文本中的 `epc` 只有 `0xc0201a18`，与 GDB 看到的位数不同。
+
+**AI：** 公共打印函数使用了 `%08x` 格式。完整地址是否改变，以 GDB 读取和比较的结果为准，不能仅凭打印的位数判断地址被截断。
+
+对应记录：[图 C9：软件分支检查](images/member2/c09-software-input-check.png)、[图 C10：软件分支输出](images/member2/c10-software-console-output.png)、[图 C11：未知原因检查](images/member2/c11-unknown-input-check.png)、[图 C12：现场输出](images/member2/c12-unknown-trapframe.png)。
+
+## 19. 检查并补齐结束条件
+
+**我：** Test 3 已经通过，但时钟还在一直输出。模块要求累计输出到设定次数后结束，请帮我检查遗漏了什么，说明需要维护的状态和复测方法，具体代码由我自己补充。
+
+**AI：** 当前实现少了累计输出后的关机。`ticks` 记录中断次数，还需要记录已经输出了多少次统计信息，这个值要能跨多次调用保留。达到输出阈值后，使用已有的 `sbi_shutdown()`。
+
+**我：** 这次就以10次统计输出作为结束条件，`TICK_NUM` 仍用原来的100。我先在自己的函数里补上这部分，不改其他文件。
+
+**AI：** 注意区分中断次数和输出次数，并检查未到阈值时是否正常返回、达到阈值时是否先完成最后一次输出。你写好后，把代码贴出来检查。
+
+**我：** 下面是我补充后的代码，请帮我检查计数的保存方式、关机条件，以及原有的分类和返回行为。
+
+```c
+void interrupt_handler(struct trapframe *tf) {
+    extern void sbi_shutdown(void);
+    enum { SHUTDOWN_AFTER = 10 };
+    static size_t tick_print_count = 0;
+
+    uintptr_t cause = tf->cause & ~((uintptr_t)1 << 63);
+
+    switch (cause) {
+    case IRQ_U_SOFT:
+        cprintf("User software interrupt\n");
+        break;
+
+    case IRQ_S_SOFT:
+        cprintf("Supervisor software interrupt\n");
+        break;
+
+    case IRQ_M_SOFT:
+        cprintf("Machine software interrupt\n");
+        break;
+
+    case IRQ_U_TIMER:
+        cprintf("User timer interrupt\n");
+        break;
+
+    case IRQ_S_TIMER:
+        clock_set_next_event();
+        ticks++;
+
+        if (ticks % TICK_NUM == 0) {
+            print_ticks();
+            tick_print_count++;
+
+            if (tick_print_count >= SHUTDOWN_AFTER) {
+                sbi_shutdown();
+            }
+        }
+        break;
+
+    case IRQ_M_TIMER:
+        cprintf("Machine timer interrupt\n");
+        break;
+
+    case IRQ_U_EXT:
+        cprintf("User external interrupt\n");
+        break;
+
+    case IRQ_S_EXT:
+        cprintf("Supervisor external interrupt\n");
+        break;
+
+    case IRQ_M_EXT:
+        cprintf("Machine external interrupt\n");
+        break;
+
+    default:
+        cprintf("Unknown interrupt: cause %lu\n",
+                (unsigned long)cause);
+        print_trapframe(tf);
+        break;
+    }
+}
+```
+
+**AI：** 代码使用局部静态变量保存输出次数，每次统计输出后更新，达到阈值时调用关机接口。原有时钟重设、`ticks` 计数和其他中断分支保持不变，也没有修改 `epc`。接下来通过运行结果确认输出次数和退出状态。
+
+**我：** 我重新编译并运行这一版，再把实际结果发给你检查。
+
+**AI：** 复测时重新启动内核，避免前面的 GDB 输入修改影响结果。
+
+## 20. 验证关机结果
+
+**我：** 怎样确认是达到次数后正常关机，而不是卡住后被超时命令结束？
+
+**AI：** 使用 QEMU 4.1.1完整路径运行当前测试内核，保存日志，统计以 `100 ticks` 开头的行数，同时读取实际运行命令的退出状态。如果使用 `timeout ... | tee ...`，应在管道结束后立即保存 Bash 的 `${PIPESTATUS[0]}`。
+
+**我：** 这次运行结束后的结果是：
+
+```text
+[Test 3] Sustained supervisor timer: PASS (40/40, ticks=200)
+QEMU_EXIT_STATUS=0
+TICK_OUTPUT_LINES=10
+```
+
+**AI：** 持续时钟测试通过，输出恰好10行，退出状态为0，与设定的关机条件一致。按每100次中断输出一次推算，关机对应第1000次中断；这里直接记录的是输出行数和退出状态。
+
+**我：** 我把这次截图和日志单独保存，前面的 GDB 截图用于说明调试过程。
+
+对应记录：[图 C13：最终结果](images/member2/c13-timer-shutdown-result.png)、[最终运行日志](C_2412419/evidence/timer-qemu4-shutdown.log)。退出状态和行数由 Shell 在运行后打印，保存在截图中，内核控制台日志记录运行输出。
+
+## 21. 检查交付范围
+
+**我：** Git 最初显示很多文件变化。请检查真正的源码改动，并确认独立测试中的临时文件没有进入交付代码。
+
+**AI：** 排除 Windows 与 WSL 的行尾差异后，源码统计只有 `code/kern/trap/trap.c`，62行增加、1行删除，对应学号标记和 `interrupt_handler()`。交付函数补丁、日志和截图即可，合并时按函数核对，保留其他成员在同一文件中的实现。
+
+**我：** 异常占位和临时声明留在测试副本里。我的40分结果应该怎样表述？
+
+**AI：** 可以记录 Test 3 的40分输出，以及已检查的软件中断和未知原因分支。小组完整评分还需要合入正式异常处理等模块，再运行 `make grade`，目前没有完整的 `Total Score: 100/100` 结果。
+
+对应记录：[图 C14：源码差异统计](images/member2/c14-code-diff-scope.png)、[本人函数补丁](C_2412419/interrupt_handler.patch)。
+
+## 22. 学习与调试提示词
+
+**我：** 把学习和调试这部分代码的要求整理成一份提示词，写清模块目标、必要依赖、接口和验证方法。AI 只提供基础框架、解释和检查建议，具体实现和测试由我完成。
+
+**AI：** 可以这样说明任务和协作方式：
+
+```text
+【Prompt：任务说明】
+
+我负责 RISC-V uCore Lab3 的中断处理模块，姓名张祎然，学号2412419，
+报告编号为2号，开发分工为成员 C。
+我将在 code/kern/trap/trap.c 中本人负责的 lab3 function2 区域编写实现，
+包括原因识别、持续时钟、计数与统计输出、累计输出后关机，以及其他中断提示。
+请解释相关接口和要求，只提供不含具体处理逻辑的基础框架。函数体由我自己填写；
+我贴出代码后，请指出问题、解释原因并给出检查建议，不代写函数体或替换我的实现。
+
+本人实现时遵守以下范围：
+- 保留本人实验标记，将对应的 YOUR CODE 替换为学号2412419。
+- 保持公共接口、结构体和宏定义不变，不修改 IRQ_*、TICK_NUM、TrapFrame，
+  不修改 SAVE_ALL、RESTORE_ALL、__alltraps、__trapret、trap、trap_dispatch、
+  exception_handler，以及时钟驱动、SBI、启动代码、公共头文件和构建配置。
+- 保留已有的中断使能与保护、现场保存与恢复、共享计数、打印和固件调用方式。
+  不修改评分脚本、测试函数、断言或编译警告选项。
+- 需要内部辅助函数时，由我在本人区域内编写，不增加公共接口。
+
+请给出基础框架、接口说明和检查步骤，每次先解释当前问题，等我贴出代码或反馈结果后
+再继续检查。编译、运行和调试命令由我执行，源码、Bash 命令、GDB 命令和预期输出分开。
+先验证局部编译，再检查运行行为；其他模块未合入时，我只在独立测试副本中准备临时依赖，
+不将它们加入交付补丁。
+最后指导我核对修改范围、导出自己的函数补丁，并整理实际结果和未验证内容。
+
+【Rely：依赖说明】
+
+请结合下列文件中与本模块有关的定义和接口，帮助我理解输入和调用关系：
+- trap.h、defs.h：struct trapframe、字段含义及 RV64 数据类型。
+- trap.c：本人实现区域、公共分发调用、TICK_NUM、print_ticks、print_trapframe。
+- riscv.h：IRQ_* 原因号。
+- clock.h、clock.c：共享 ticks、初始化约定、clock_set_next_event 的单次定时语义。
+- sbi.h、sbi.c：现有定时与关机接口。
+
+验证时查看 test_lab3.c 中的持续时钟和 handler 分支测试，以及 grade.sh 的对应检查。
+报错涉及其他文件时，再根据位置补充阅读。运行前确认实际 QEMU 路径和版本，
+本次使用已安装的4.1.1；sbadaddr 名称兼容问题在测试构建参数中处理。
+
+【Guarantee：接口清单】
+
+我的实现需要保持以下对外接口：
+void interrupt_handler(struct trapframe *tf);
+
+该入口保留外部链接属性，供公共分发和现有测试调用。
+输入为有效的、已保存现场的 TrapFrame。正常处理后返回调用者，由公共汇编恢复现场；
+达到结束条件时使用现有 sbi_shutdown 请求关机。
+继续使用框架的 ticks、clock_set_next_event、print_ticks 和 print_trapframe。
+我编写的辅助函数应为私有接口，检查时说明其输入、输出和允许修改的状态。
+
+【Specification：行为规格】
+
+以下用于检查本人完成的代码。
+前置条件：当前为 RV64 单核运行，未主动开启嵌套中断；tf 有效，时钟和中断初始化
+由框架完成。干净启动时 ticks 和累计输出次数为0。TICK_NUM 保持100，
+本次 SHUTDOWN_AFTER 配置为10次统计输出。
+
+S1 原因分类与现场保持
+根据去掉最高中断标志位后的原因号分类。原始 cause、epc、status、badvaddr 和
+通用寄存器保存区保持不变，不跳过被中断指令。
+检查0x8000000000000005和0x8000000000000001分别对应 Supervisor 时钟和软件中断，
+并比较处理前后的 TrapFrame。
+
+S2 Supervisor 时钟处理
+每次处理安排一次后续时钟事件，且共享 ticks 从进入时的n恰好增加到n+1。
+沿用框架接口，时钟重设发生在计数更新之前；未达到关机条件时正常返回。
+用 GDB 检查 handler 到 clock_set_next_event、sbi_set_timer 的调用，
+比较入口与 __trapret 的计数，并观察下一次中断能否到达。
+
+S3 周期输出
+更新后的 ticks 为 TICK_NUM 整数倍时，调用已有 print_ticks 输出一次，
+累计输出次数增加一次；其余时钟处理中不输出统计行。ticks 不清零，输出次数跨调用保留。
+检查98→99不输出、99→100输出一次、100→101不输出、199→200再次输出。
+
+S4 结束条件
+累计输出不足10次时继续运行；完成第10次统计输出后调用 sbi_shutdown。
+检查第9次输出后尚未关机、第10次输出后结束。独立运行应得到 Test 3 的
+ticks=200 PASS、10行100 ticks及 QEMU_EXIT_STATUS=0。
+经过管道保存日志时，读取实际运行命令的退出状态。
+
+S5 其他已知中断
+IRQ_U_SOFT、IRQ_S_SOFT、IRQ_M_SOFT、IRQ_U_TIMER、IRQ_M_TIMER、
+IRQ_U_EXT、IRQ_S_EXT、IRQ_M_EXT 分别输出对应级别的软件、时钟或外部中断提示。
+提示文本与框架约定一致。处理后 ticks、累计输出次数和 TrapFrame 不变，
+不重设定时器、不输出100 ticks、不请求关机，正常返回。
+逐项构造函数输入，比较输出、状态和接口调用。
+
+S6 未知原因
+不属于已知类型时，输出原因号并调用 print_trapframe(tf) 打印原始现场，随后返回。
+ticks、累计输出次数和 TrapFrame 不变，不重设定时器或请求关机。
+分别用15和0x800000000000000f检查，均应输出 Unknown interrupt: cause 15。
+这些输入用于直接检查 handler，不代替公共分发或真实硬件触发测试。
+
+验证时保留原有测试，边界和分支检查在独立副本中进行。人工修改输入后，
+重新启动当前内核完成最终持续运行与关机检查。完整 make grade 在正式模块合并后执行。
+```
+
+**我：** 我现有的截图和日志已经验证了哪些要求？
+
+**AI：** 已有记录包括真实时钟原因、重设调用、计数从0到1和 `epc` 保持，以及持续时钟和10次输出后的正常退出。软件中断和直接输入15的分支也做过检查。其余已知类型、带最高标志位的未知原因、全部现场字段和输出临界点，还没有逐项测试记录，后续需要补充。
+
+实现说明和实验图片见 [report.md](report.md) 的2号部分。
