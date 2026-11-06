@@ -725,7 +725,167 @@ sret
 
 ### 5.1 1号成员测试与验证
 
-1号完成了 `git diff --check`、`trapentry.o` 独立编译和反汇编检查。生成的指令包含 CSR 与通用寄存器恢复、向 `trap()` 传参和调用，以及最后的 `sret`，详细过程见 4.1.4。完整的寄存器上下文测试结果待集成后补充。
+1号成员主要负责 Trap 入口与上下文恢复功能的实现和验证。在代码层面，首先完成了 `git diff --check`、`trapentry.o` 独立编译和反汇编检查，确认汇编代码能够正确生成 CSR 操作、通用寄存器恢复、函数调用以及 `sret` 返回指令，详细过程见 4.1.4。
+
+在完成小组代码集成后，进一步使用 GDB 对 Trap 入口和上下文恢复过程进行动态调试，重点验证 TrapFrame 的建立、异常处理后的 EPC 更新、通用寄存器恢复以及特权级返回。
+
+#### 5.1.1 GDB 调试环境与测试入口
+
+本次调试使用 QEMU 模拟 RISC-V 运行环境，通过 GDB 远程连接进行断点调试。QEMU 版本为 4.1.1，GDB 版本为 15.1。调试在独立临时副本中进行，不修改正式仓库的代码。
+
+首先启动 QEMU 的 GDB 调试模式，并通过 `make gdb` 建立远程连接，随后在 `test_lab3_register_context`、`__alltraps`、`trap`、`exception_handler` 和 `__trapret` 等位置设置断点。
+
+![GDB远程连接与测试入口](images/member1/m01-gdb-remote-connection-and-test-entry.png)
+
+#### 5.1.2 Trap 入口与上下文保存验证
+
+程序执行到 `test_lab3_register_context` 后，通过汇编指令为多个通用寄存器设置预设值，随后执行 `ebreak`，主动触发断点异常。
+
+在 `__alltraps` 处暂停后，使用 `info registers` 检查寄存器状态，确认预先设置的寄存器值均已正确保留。随后程序进入 `trap()`，通过 `info registers sp a0` 可以观察到：
+
+```text
+sp = 0xffffffffc0205ec0
+a0 = 0xffffffffc0205ec0
+```
+
+说明当前 TrapFrame 地址正确地通过 a0 传递给 C 语言处理函数。
+
+进一步使用 `x/36gx $sp` 检查 TrapFrame 的 36 个机器字，确认通用寄存器、状态寄存器和异常相关信息均按照预期保存。其中，部分关键字段如下：
+
+| 字段 | 保存值 |
+|---|---|
+| ra | `0xffffffffc0201a74` |
+| sp | `0xffffffffc0205fe0` |
+| gp | `0x0` |
+| tp | `0x8001be00` |
+| t0 | `0x105` |
+| s0 | `0x108` |
+| a0 | `0x53` |
+| sstatus | `0x8000000000006100` |
+| sepc | `0xffffffffc0201b04` |
+| scause | `0x3` |
+
+由此确认，Trap 入口能够正确建立 TrapFrame，并保存发生异常前的处理器上下文。
+
+![Trap入口寄存器状态](images/member1/m02-gdb-trap-entry-registers.png)
+
+![TrapFrame内存布局](images/member1/m03-gdb-trapframe-layout.png)
+
+#### 5.1.3 断点异常处理与 EPC 更新验证
+
+程序进入 `exception_handler()` 后，通过 GDB 检查异常原因和异常发生地址：
+
+```gdb
+p/x tf->cause
+p/x tf->epc
+x/2hx tf->epc
+```
+
+得到：
+
+```text
+tf->cause = 0x3
+tf->epc   = 0xffffffffc0201b04
+
+0xffffffffc0201b04:
+    0x9002  0x0513
+```
+
+其中，异常原因 `0x3` 对应 RISC-V 断点异常，指令 `0x9002` 为 16 位压缩断点指令。根据指令长度判断逻辑，处理函数将 EPC 增加 2 字节，使程序能够跳过已经处理的断点指令，继续执行后续代码。
+
+在进入 `__trapret` 后，再次检查 TrapFrame 中保存的 EPC：
+
+```gdb
+x/2gx $sp+256
+x/gx $sp+264
+```
+
+观察到更新后的 EPC 为：
+
+```text
+0xffffffffc0201b06
+```
+
+与预期的 `0xffffffffc0201b04 + 2` 一致，说明异常处理函数对返回地址的修改已经正确保存。
+
+![断点异常与EPC检查](images/member1/m04-gdb-breakpoint-exception-and-epc.png)
+
+#### 5.1.4 上下文恢复与 sret 返回验证
+
+在 `__trapret` 处检查反汇编结果，可以观察到程序首先从 TrapFrame 中恢复 `sepc` 和 `sstatus`，随后依次恢复通用寄存器，最后恢复栈指针并执行 `sret`。
+
+关键指令如下：
+
+```asm
+ld      a0, 264(sp)
+csrw    sepc, a0
+
+ld      a0, 256(sp)
+csrw    sstatus, a0
+
+# 恢复通用寄存器
+ld      ra, 8(sp)
+ld      gp, 24(sp)
+ld      tp, 32(sp)
+# 其余寄存器依次恢复
+
+# 最后恢复 sp
+ld      sp, 16(sp)
+
+# 返回原执行流
+sret
+```
+
+为验证恢复结果，在原程序断点指令之后设置临时断点，随后单步执行上下文恢复过程。程序成功经过 `sret`，停在原执行流的下一条指令处。
+
+通过 `info registers` 检查恢复后的寄存器，结果如下：
+
+| 寄存器 | 恢复后的值 |
+|---|---|
+| t0～t2 | `0x105`～`0x107` |
+| s0～s1 | `0x108`～`0x109` |
+| a0 | `0x53` |
+| a1～a7 | `0x10b`～`0x111` |
+| s2～s11 | `0x112`～`0x11b` |
+| t3～t6 | `0x11c`～`0x11f` |
+| gp | `0x0` |
+| tp | `0x8001be00` |
+| sp | `0xffffffffc0205fe0` |
+| ra | `0xffffffffc0201a74` |
+
+所有检查结果均与 Trap 发生前保存的上下文一致，说明 `RESTORE_ALL` 能够正确恢复处理器寄存器状态，并通过 `sret` 返回原执行流。
+
+![EPC更新与上下文恢复入口](images/member1/m05-gdb-epc-advance-and-restore-entry.png)
+
+![sret后寄存器恢复结果](images/member1/m06-gdb-restored-registers-after-sret.png)
+
+#### 5.1.5 最终测试结果
+
+最后，在 `test_lab3_register_context` 返回位置设置临时断点，检查汇编测试函数的返回值：
+
+```gdb
+p/x $a0
+p/x $pc
+```
+
+得到：
+
+```text
+$a0 = 0x0
+$pc = 0xffffffffc0201a74
+```
+
+其中，返回值为 0 表示寄存器上下文检查全部通过。继续运行后，测试程序输出：
+
+```text
+[Test 1] Trap entry and breakpoint return: PASS (35/35)
+```
+
+此外，集成后的完整评分测试 `make grade` 也已通过，最终得分为 **100/100**，其中与本模块直接相关的 Trap 入口及寄存器恢复测试获得 35/35 分。
+
+![寄存器上下文测试通过](images/member1/m07-gdb-register-context-test-pass.png)
+
+综上，1号成员负责的 Trap 入口与上下文恢复功能通过了独立编译、反汇编检查、GDB 动态调试及集成评分测试，验证了从 Trap 进入、上下文保存、异常处理、上下文恢复到 `sret` 返回的完整执行流程。
 
 ### 5.2 2号成员测试与验证
 
