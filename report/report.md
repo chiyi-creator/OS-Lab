@@ -7,9 +7,9 @@
 | 实验名称 | 操作系统实验三：断，都可以断 |
 | 小组成员 | 2413669 张懿鸾、2412419 张祎然、2413788 张旗庭 |
 | 代码分支 | `lab3` |
-| 报告整理日期 | 2026-11-02 |
+| 报告整理日期 | 2026-11-04 |
 | 实验内容 | Trap 入口与上下文恢复、中断处理、异常处理 |
-| 当前进度 | 2号已完成独立编译、时钟运行、GDB 分支检查及关机验证 |
+| 当前进度 | 三位成员均已完成各自负责的功能模块及相关验证；已在临时集成分支完成代码整合、QEMU 运行和 GDB 调试，make grade 自动评分为 100/100|
 
 ### 小组分工
 
@@ -26,7 +26,7 @@
 - **3号：** 4.3 的异常处理实现、5.3 的测试记录，以及 6.1、6.2 中的个人总结。
 - **共同部分：** 实验目的、环境、整体流程、模块接口、5.4 的集成测试，以及 6.3、6.4 的原理分析和后续内容。
 
-报告先说明 Trap 的执行流程和各模块的关系，再介绍实现与调试过程。目前记录了1号的汇编检查结果和2号的独立测试结果，小组完整评分仍需在正式代码合并后补充。
+报告先说明 Trap 的执行流程和各模块的关系，再介绍实现与调试过程。目前已完成三位成员的独立测试及临时集成测试，完整评分为100/100。
 
 ---
 
@@ -547,9 +547,179 @@ void interrupt_handler(struct trapframe *tf) {
 
 关机接口通过函数内的 `extern void sbi_shutdown(void)` 引用已有定义，阈值使用局部枚举，输出次数使用局部静态变量。这样可以将改动保留在自己的函数中。声明已与 `libs/sbi.h`、`libs/sbi.c` 核对；后续合并时，如需统一头文件和阈值配置，再由小组共同调整。
 
-### 4.3 功能模块二：物理内存分配功能的任务二——Best-Fit 分配算法
+### 4.3 功能模块二：异常处理
 
-**负责人：**
+**负责人：2413788 张旗庭（3号）**
+
+#### 4.3.1 任务理解与相关源码分析
+
+本次我负责实现异常处理函数 `exception_handler(struct trapframe *tf)`，主要完成非法指令异常、断点异常及其他异常的分类处理。当 RISC-V 处理器执行程序发生异常时，硬件会将异常原因和异常发生位置记录在相关 CSR 中，底层汇编通过 `SAVE_ALL` 保存处理器上下文，再由 `trap_dispatch()` 将异常交给 `exception_handler()` 处理。
+
+断点异常和非法指令异常通常由当前正在执行的指令触发，如果处理完成后仍然返回原指令地址，CPU 可能重复执行该指令，从而再次触发相同异常。因此，本模块除了识别异常类型和输出异常信息，还需要根据触发异常的指令长度正确调整 `tf->epc`，使程序能够从下一条指令继续执行。对于其他未专门处理的异常，则调用已有的 `print_trapframe()` 进行兜底输出。
+
+在实现前，我首先阅读了与异常处理相关的源码，了解 TrapFrame 的数据结构、异常原因码的定义，以及异常处理函数与底层汇编之间的调用关系。主要阅读了`kern/trap/trap.c`，`kern/trap/trap.h`（了解`struct trapframe` 的结构及字段），`libs/riscv.h`（查看`CAUSE_ILLEGAL_INSTRUCTION`、`CAUSE_BREAKPOINT` 等宏定义，确认其原因码），`kern/trap/trapentry.S`（理解异常前后的上下文保存、恢复及 `sret` 返回过程）。
+
+通过源码分析，可以明确本模块主要依赖 TrapFrame 中的两个字段：
+
+- `tf->cause`：对应保存的 `scause`，用于判断异常类型。本实验中，非法指令异常对应原因码2，断点异常对应原因码3。
+- `tf->epc`：对应保存的 `sepc`，记录发生异常时的指令地址。修改该字段可以改变异常处理完成后的返回位置。
+
+此外，RISC-V 支持16位压缩指令与32位普通指令，因此不能统一将 `tf->epc` 增加4字节。本模块需要根据指令编码判断其长度，再将 EPC 增加相应的字节数。异常处理完成后，`RESTORE_ALL` 将更新后的 EPC 恢复到 `sepc`，最终通过 `sret` 返回原执行流。
+
+#### 4.3.2 异常处理函数的设计思路
+
+根据实验要求，`exception_handler()` 需要完成异常类型识别、异常信息输出和根据对应指令的长度正确更新 `tf->epc`。本次采用 `switch` 分支结构，根据 `tf->cause` 对异常进行分类，并将断点异常和非法指令异常的公共处理逻辑合并，减少重复代码。
+
+**（1）异常类型识别与分类处理**
+
+首先读取 TrapFrame 中的 `cause` 字段，通过 `switch (tf->cause)` 判断异常类型。实验要求处理的主要情况如下：
+
+| 异常类型 | 对应原因码 | 处理方式 |
+|---|---|---|
+| 非法指令异常 | `CAUSE_ILLEGAL_INSTRUCTION`（2） | 输出异常类型及地址，更新 EPC |
+| 断点异常 | `CAUSE_BREAKPOINT`（3） | 输出异常类型及地址，更新 EPC |
+| 其他异常 | `default` | 调用 `print_trapframe(tf)` 输出异常现场 |
+
+对于非法指令异常，使用 `cprintf()` 输出 `Illegal instruction at 0x...`；对于断点异常，输出 `Breakpoint at 0x...`。两种情况均先输出原始 EPC，便于确定触发异常的指令地址，再进入统一的指令长度判断和 EPC 更新逻辑。
+
+对于其他异常，直接调用 `print_trapframe(tf)`，随后使用 `return` 退出函数，不再执行后续的 EPC 更新操作。
+
+**（2）异常指令长度判断**
+
+由于 RISC-V 支持16位压缩指令和32位普通指令，异常处理时不能直接使用固定的 EPC 偏移量，否则可能跳过错误的位置。根据 RISC-V 指令编码规则，在本实验涉及的16位和32位指令范围内，可以利用指令最低两位判断长度：
+
+- 最低两位不为 `11`：按照16位压缩指令处理，指令长度为2字节。
+- 最低两位为 `11`：按照32位普通指令处理，指令长度为4字节。
+
+为此，设计时只读取 `tf->epc` 指向位置的前16位指令编码，并通过位运算 `(insn & 0x3)` 提取最低两位。这样不需要为了判断长度而直接读取完整的32位指令。
+
+确定指令长度后，根据判断结果修改 `tf->epc`：
+
+```c
+tf->epc += (insn & 0x3) == 0x3 ? 4 : 2;
+```
+
+#### 4.3.3 AI 提示词设计
+
+将实验框架拉取到本地之后，在VS Code使用Codex进行函数生成，使用的提示词如下：
+
+```text
+你现在需要协助我完成 RISC-V uCore 操作系统实验三（中断与异常处理）。
+一、实验背景
+当前项目是 RISC-V 64 位 uCore，运行于 WSL Ubuntu + QEMU 环境中。
+本实验需要实现完整的 Trap 处理机制，包括上下文保存与恢复、Trap 入口和返回、中断处理、异常处理。
+我仅负责 code/kern/trap/trap.c 中的 exception_handler(struct trapframe *tf)。
+
+二、任务要求
+实现函数：
+void exception_handler(struct trapframe *tf);
+
+具体要求：
+1. 识别非法指令异常 CAUSE_ILLEGAL_INSTRUCTION，输出实验要求的信息，根据触发异常的指令长度正确更新 tf->epc。
+2. 识别断点异常 CAUSE_BREAKPOINT，输出实验要求的信息，并正确更新 tf->epc。
+3. 正确区分 RISC-V 16 位压缩指令与 32 位普通指令，不能直接假设所有异常指令都是 4 字节。
+4. 对其他异常调用现有的 print_trapframe(tf) 输出异常现场。
+5. 保持函数签名不变，确保与现有 trap_dispatch()、trap() 和 Trap 返回流程兼容。
+
+三、请先分析代码
+请阅读以下文件及必要的依赖：
+- code/kern/trap/trap.c
+- code/kern/trap/trap.h
+- code/kern/trap/trapentry.S
+- code/libs/riscv.h
+- code/Makefile
+- 实验自动化测试脚本及相关测试代码
+
+尤其需要确定：
+- struct trapframe 的实际布局。
+- 异常类型宏及其数值。
+- 如何可靠判断触发异常的指令长度。
+- 本实验对异常处理输出字符串的准确要求。
+- 现有测试如何触发异常，以及如何判断异常返回是否正确。
+
+四、实现限制
+1. 只修改 code/kern/trap/trap.c 中 //lab3 function2 YOUR CODE 对应区域，添加我负责的 exception_handler()。
+2. 不要修改 trapentry.S、trap.h、SAVE_ALL、RESTORE_ALL 或 trap_dispatch()。
+3. 不要修改成员 C 的 interrupt_handler.c、.patch，也不要覆盖其成果。
+4. 不要修改 Makefile、测试脚本或已有的公共函数。
+5. 不要自行添加未经要求的功能。
+6. 如果发现完整编译需要先集成成员 C 的函数，请明确说明，不要擅自修改其他成员的代码。
+7. 不要进行 Git commit、push、merge 或切换分支。
+
+五、实现与验证
+在阅读项目代码之后，完成 exception_handler() 的实现。
+
+尽可能进行编译检查，并检查以下问题：
+- tf->cause 的分支处理是否正确。
+- 断点异常与非法指令异常的输出格式是否正确。
+- tf->epc 是否跳过完整的异常指令。
+- 16 位和 32 位指令是否得到正确处理。
+- 默认分支是否调用 print_trapframe(tf)。
+- 是否存在编译错误、异常重复触发或潜在的内存访问问题。
+对于能够执行的测试，请实际执行并报告结果；对于因其他模块尚未集成而无法完成的测试，请如实说明，不要声称测试通过。
+
+六、最后向我汇报
+1. 修改了哪些代码以及具体位置。
+2. 异常处理函数的核心实现逻辑。
+3. 为什么使用当前的指令长度判断方法。
+4. 编译和测试结果。
+5. 仍然存在的问题及后续需要进行的集成测试。
+6. 我在实验报告中应该重点解释哪些技术细节。
+请直接在当前项目中完成成员 B 的代码实现，保持代码简洁、符合原有项目风格。
+```
+
+#### 4.3.4 exception_handler() 的具体实现
+
+Codex 根据提示词阅读了相关源码，最终在 code/kern/trap/trap.c 的 //lab3 function2 YOUR CODE 标记处添加了 exception_handler()，代码内容如下：
+
+```c
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+    case CAUSE_ILLEGAL_INSTRUCTION:
+        cprintf("Illegal instruction at 0x%016lx\n", (unsigned long)tf->epc);
+        break;
+    case CAUSE_BREAKPOINT:
+        cprintf("Breakpoint at 0x%016lx\n", (unsigned long)tf->epc);
+        break;
+    default:
+        print_trapframe(tf);
+        return;
+    }
+
+    /* Lab3 kernel text is readable; fetch only the first 16-bit parcel. */
+    uint16_t insn = *(const volatile uint16_t *)tf->epc;
+    /* For the target's 16/32-bit instructions, low bits 11 mean 4 bytes. */
+    tf->epc += (insn & 0x3) == 0x3 ? 4 : 2;
+}
+
+```
+
+#### 4.3.5 与 Trap 返回流程的衔接
+
+异常处理函数 `exception_handler()` 主要负责识别异常类型、输出异常信息以及调整返回地址，但并不直接完成处理器上下文的恢复。异常处理结束后，程序需要重新进入底层汇编恢复流程，才能回到原来的执行位置继续运行。
+
+本实验中，异常处理与 Trap 返回的衔接流程如下：
+
+```text
+异常发生
+    ↓
+__alltraps → SAVE_ALL
+保存处理器上下文，建立 TrapFrame
+    ↓
+trap() → trap_dispatch()
+根据异常原因调用 exception_handler()
+    ↓
+exception_handler()
+处理异常，并根据指令长度更新 tf->epc
+    ↓
+__trapret → RESTORE_ALL
+恢复处理器上下文，将更新后的 EPC 写回 sepc
+    ↓
+sret
+返回更新后的指令地址，继续执行原程序
+```
+
+后续通过 GDB 观察 EPC 修改、`sepc` 恢复以及 `sret` 执行后的 PC 变化，进一步验证了上述流程，具体结果见第 5.3 节。
 
 ## 五、测试验证与 GDB 调试
 
@@ -784,22 +954,318 @@ Test 3 在计数达到200时就输出 PASS，之后仍然循环，并不检查�
 
 这些问题出现在不同阶段。之后遇到报错时，我会先看当前执行的是编辑器、Shell、编译器还是 GDB，再根据出错位置检查对应代码和环境。这样更容易找到原因，也能减少无关修改。
 
-### 5.3 3号成员测试与验证
+本次主要对 `exception_handler()` 的异常分类、指令长度判断及 EPC 更新进行测试。在完成代码实现后，先通过编译检查和 QEMU 运行确认代码能够正常工作，再使用 GDB 观察异常发生时的 TrapFrame、异常处理后的 EPC 变化，以及 `sepc` 恢复和 `sret` 返回过程。
 
-### 5.4 集成测试与当前进度
+#### 5.3.1 代码编译与集成测试准备
+
+Codex 完成 `exception_handler()` 的编写后，首先对函数进行了独立编译及隔离测试，并通过 `git diff --check` 检查代码修改。随后，我在 WSL Ubuntu 环境中使用原有的 RISC-V GCC 工具链进行完整内核编译。
+
+由于最初的 `trap.c` 中尚未集成成员2负责的 `interrupt_handler()`，第一次编译出现了函数未声明的错误。为避免直接修改公共 `lab3` 分支，我先将自己的异常处理代码提交到 `feature/lab3-exception` 分支，再创建 `test/lab3-integration` 临时集成分支。
+
+在测试分支中，将成员2提供的 `interrupt_handler()` 与自己的 `exception_handler()` 合入 `trap.c`，随后执行：
+
+```bash
+make -C code -j2
+```
+
+编译成功生成 `bin/kernel` 和 `bin/ucore.img`，说明两个 C 语言处理函数与成员1的 Trap 入口汇编能够完成编译和链接。
+
+<p align="center">
+  <img src="images/member3/com-ok.png" alt="编译成功" width="600">
+</p>
+
+接着运行：
+
+```bash
+make -C code qemu
+make -C code grade
+```
+
+QEMU 能够正常启动内核，时钟中断持续触发并最终退出，自动化评分也全部通过。
+
+<p align="center">
+  <img src="images/member3/grade100.png" alt="自动化评分" width="500">
+</p>
+
+为了单独验证异常处理函数，我首先将当前实验代码复制到临时测试目录，使用实验框架提供的 `inject.py` 加入异常测试代码，使内核能够主动触发断点异常和非法指令异常。
+
+随后，通过编译宏 GRADE_LAB3_CONTEXT 和 GRADE_LAB3_ILLEGAL 分别构建对应的测试内核，并使用 QEMU 和 GDB 观察异常发生及返回过程。
+
+```bash
+DBG=/tmp/ucore_lab3_b_gdb
+mkdir -p "$DBG"
+
+tar -C code --exclude='./bin' --exclude='./obj' -cf - . \
+    | tar -C "$DBG" -xf -
+
+python3 code/tools/inject.py "$DBG"
+```
+
+调试时使用两个终端：终端1通过 QEMU `debug` 目标启动虚拟机，终端2使用 RISC-V GDB 连接 `localhost:1234`，设置断点并观察异常现场。
+
+#### 5.3.2 16位断点异常的识别与 EPC 更新
+
+首先使用 `GRADE_LAB3_CONTEXT` 构建断点异常测试内核：
+
+```bash
+make -C "$DBG" -j2 DEFS+=-DGRADE_LAB3_CONTEXT
+```
+
+启动 QEMU 后，在 GDB 中设置异常处理函数断点：
+
+```gdb
+target remote localhost:1234
+break exception_handler
+continue
+```
+
+进入 `exception_handler()` 后，检查异常原因、原始 EPC 和异常指令编码：
+
+```gdb
+p/d tf->cause
+p/x tf->epc
+x/1hx tf->epc
+```
+
+得到以下结果：
+
+<p align="center">
+  <img src="images/member3/16-cause3.png" alt="断点异常" width="500">
+</p>
+
+
+`cause = 3` 对应 `CAUSE_BREAKPOINT`，说明程序成功进入断点异常处理分支。指令编码 `0x9002` 的最低两位为 `10`，因此按照 RISC-V 压缩指令处理，长度为2字节。
+
+为了观察 EPC 的实际变化，我先保存原始值，再设置硬件监视点：
+
+```gdb
+set $saved_tf = tf
+set $old_epc = tf->epc
+disable 1
+watch -location $saved_tf->epc
+continue
+```
+继续执行的时候，exception_handler() 中的 EPC 更新语句让epc+2，当epc被修改的时候，GDB 的硬件监视点被触发。继续检查：
+
+```gdb
+p/x $old_epc
+p/x $saved_tf->epc
+p/d $saved_tf->epc - $old_epc
+```
+
+结果显示：
+
+<p align="center">
+  <img src="images/member3/16-epcchange.png" alt="epc" width="400">
+</p>
+
+修改后的EPC为`0xffffffffc0201b06`，增量为两字节。说明异常处理函数正确识别了16位断点指令，并将 EPC 调整到下一条指令位置。
+
+
+#### 5.3.3 断点异常的 sepc 恢复与 sret 返回
+
+EPC 修改完成后，还需要检查更新后的地址能否通过 Trap 返回机制真正成为 CPU 的执行位置。
+
+在 GDB 中对 `__trapret` 设置临时断点：
+
+```gdb
+tbreak __trapret
+continue
+```
+
+程序成功停在 `trapentry.S` 的 `RESTORE_ALL` 处。查看对应汇编，可以观察到恢复 EPC 的两条关键指令：
+
+<p align="center">
+  <img src="images/member3/16-trapen.png" alt="停在_ALL" width="600">
+</p>
+
+```asm
+ld a0, 264(sp)
+csrw sepc, a0
+```
+
+第一条从 TrapFrame 中读取 EPC，第二条将其写入 `sepc` 寄存器。
+
+单步执行后，GDB 观察到 `sepc` 从原来的 `0xffffffffc0201b04` 更新为 `0xffffffffc0201b06`。
+随后，在 `sret` 指令处设置临时断点，并通过 `si` 单步执行。执行完成后，PC 变为：
+
+```text
+0xffffffffc0201b06
+```
+
+说明 CPU 已经跳过原来的16位断点指令，从下一条指令继续执行。
+
+<p align="center">
+  <img src="images/member3/16-specandpc.png" alt="返回" width="600">
+</p>
+
+这表明 `exception_handler()` 对 EPC 的修改能够被 `RESTORE_ALL` 正确恢复，并通过 `sret` 生效，完成了断点异常从触发到返回的完整流程。
+
+#### 5.3.4 32位非法指令异常的识别与 EPC 更新
+
+完成断点异常测试后，重新编译非法指令测试内核：
+
+```bash
+make -C "$DBG" clean
+make -C "$DBG" -j2 DEFS+=-DGRADE_LAB3_ILLEGAL
+```
+
+重新启动 QEMU 和 GDB，在 `exception_handler()` 处设置断点，读取异常信息。
+
+实际结果如下：
+
+<p align="center">
+  <img src="images/member3/32-cause2.png" alt="非法指令" width="500">
+</p>
+
+
+`cause = 2` 对应 `CAUSE_ILLEGAL_INSTRUCTION`，说明成功识别到非法指令异常。原始EPC为`0xffffffffc0201ab4`，指令前16位是`0x007b`，最低两位为`11`,因此，异常处理函数应当将 EPC 增加4字节。
+
+与断点异常测试类似，我再次使用硬件监视点观察 EPC 的更新过程。
+
+<p align="center">
+  <img src="images/member3/32-epc.png" alt="epc" width="400">
+</p>
+
+GDB 显示：
+
+| 项目 | 数值 |
+|---|---|
+| 修改前 EPC | `0xffffffffc0201ab4` |
+| 修改后 EPC | `0xffffffffc0201ab8` |
+| EPC 增量 | 4字节 |
+
+这说明异常处理函数正确识别了32位非法指令，并将返回位置调整到了下一条指令。
+
+
+#### 5.3.5 非法指令异常的 sepc 恢复与 sret 返回
+
+为了确认非法指令异常能够正常返回，我继续在 `__trapret` 处设置断点，观察 `RESTORE_ALL` 恢复寄存器的过程。
+
+在执行恢复 `sepc` 的汇编指令之前，CPU 的 `sepc` 仍为原始地址：`0xffffffffc0201ab4`。
+执行 `ld a0,264(sp)` 后，寄存器 `a0` 取得 TrapFrame 中更新后的 EPC。随后执行 `csrw sepc,a0`，观察到：`sepc = 0xffffffffc0201ab8`。
+
+<p align="center">
+  <img src="images/member3/32-spec.png" alt="spec" width="600">
+</p>
+
+继续执行到 `sret`，通过 GDB 单步检查返回后的 PC：
+
+```gdb
+si
+p/x $pc
+```
+
+最终得到：`0xffffffffc0201ab8`
+
+<p align="center">
+  <img src="images/member3/32-pc.png" alt="pc" width="500">
+</p>
+
+说明 CPU 已经跳过4字节的非法指令，返回正确的执行位置，没有再次触发同一条非法指令异常。
+
+
+结合前面的断点异常测试，可以确认本次实现能够根据16位和32位指令的实际长度，正确选择2字节或4字节的 EPC 增量。
+
+#### 5.3.6 其他异常的默认处理
+
+除断点异常和非法指令异常外，实验还要求对其他异常调用 `print_trapframe(tf)`，输出异常现场。
+本次使用测试框架提供的 `test_lab3_handler_fallbacks()` 验证这一功能。该测试构造 TrapFrame，并直接调用相应的处理函数，不需要真实触发硬件异常。
+
+在 GDB 中对 `print_trapframe()` 设置临时断点：
+
+```gdb
+tbreak print_trapframe
+continue
+```
+
+第一次命中时，调用来源为成员2的 `interrupt_handler()`，对应未知中断原因15。
+继续设置断点并运行后，第二次进入 `print_trapframe()`，此时调用栈为：
+
+```text
+#0 print_trapframe()
+#1 exception_handler()
+#2 test_lab3_handler_fallbacks()
+#3 test_lab3_exception_context()
+```
+
+检查参数：
+
+```gdb
+p/d tf->cause
+p/x tf->epc
+```
+
+得到：
+
+| 检查项目 | 结果 |
+|---|---|
+| `tf->cause` | 20 |
+| `tf->epc` | `0x0` |
+| 调用来源 | `exception_handler()` |
+| 处理方式 | `print_trapframe(tf)` |
+
+<p align="center">
+  <img src="images/member3/other.png" alt="20" width="700">
+</p>
+
+原因码20不属于本次专门处理的两种异常，因此函数进入 `default` 分支，调用 `print_trapframe()` 输出现场信息。
+其中 `epc=0` 是测试程序人工构造的字段值，并不是真实异常发生的位置。该测试主要验证默认分支的调用行为。
+
+<p align="center">
+  <img src="images/member3/cause14.png" alt="14" width="200">
+</p>
+
+随后继续运行，终端输出中可以看到原因码为 `0x00000014` 的 TrapFrame，以及测试完成提示，说明默认处理分支正常工作。
+
+<p align="center">
+  <img src="images/member3/test2.png" alt="14" width="600">
+</p>
+
+#### 5.3.7 AI 辅助开发及调试中遇到的问题
+
+在使用 Codex 生成 `exception_handler()` 以及后续测试过程中，遇到了一些编译环境、代码集成和 GDB 调试方面的问题。具体如下：
+
+**（1）小组代码尚未集成导致编译失败**
+
+第一次完整编译时，由于 `trap.c` 中尚未集成其他成员负责的 `interrupt_handler()`，编译出现函数未声明的问题。
+
+为避免覆盖队友代码，我先保存自己负责的异常处理实现，再建立 `test/lab3-integration` 临时测试分支，将两个处理函数合入同一文件。重新编译后，成功生成内核镜像，并通过后续集成测试。
+
+这一问题并非异常处理函数本身的逻辑错误，而是小组各模块尚未完成集成所导致的。
+
+**（2）GDB 无法直接观察 EPC 的更新结果**
+
+在验证16位断点异常时，最初按照 AI 提供的方案使用 GDB 的 `finish` 命令，希望在异常处理函数执行结束后检查 EPC 的变化，但实际没有观察到预期的增量。
+
+经过分析，考虑到代码编译时启用了 `-O2` 优化，源码断点位置和实际机器指令的执行位置可能不完全一致。因此，调整调试方法，使用 `watch -location` 设置硬件监视点，直接观察 `tf->epc` 所在内存的修改。
+
+最终，硬件监视点成功捕获16位断点异常的 EPC 增加2字节、32位非法指令异常的 EPC 增加4字节。随后结合汇编单步调试，确认更新后的地址被恢复到 `sepc`，并通过 `sret` 正确返回。
+
+### 5.4 集成测试
 
 完整评分由 [tools/grade.sh](../code/tools/grade.sh) 执行。脚本分别使用不同测试宏重建内核、运行 QEMU，再检查对应输出。各项分值和当前情况如下。
 
 | 用例 | 分值 | 检查内容 | 当前情况 |
 |------|------|----------|----------|
-| Test 1 | 35 | Trap 入口、寄存器恢复和断点返回，检查对应 PASS 与 `Breakpoint at` | 正式模块集成后补充运行结果 |
-| Test 2 | 25 | 非法指令返回，以及软件中断、未知中断和其他异常提示 | 2号检查了其中两个中断分支，非法指令和异常分支仍需验证 |
-| Test 3 | 40 | 时钟重设和反复返回，检查 PASS、`100 ticks`、`ticks=200` | 2号独立副本已取得对应输出 |
-| 总分 | 100 | 三个用例全部通过 | 尚无完整 `Total Score: 100/100` 记录 |
+| Test 1 | 35 | Trap 入口、寄存器恢复和断点返回，检查对应 PASS 与 `Breakpoint at` | PASS（35/35） |
+| Test 2 | 25 | 非法指令返回，以及软件中断、未知中断和其他异常提示 | PASS（25/25） |
+| Test 3 | 40 | 时钟重设和反复返回，检查 PASS、`100 ticks`、`ticks=200` | PASS（40/40） |
+| 总分 | 100 | 三个用例全部通过 | 100/100 |
 
-集成时需要换用正式的 `exception_handler()`，统一 QEMU 版本和 CSR 名称兼容方式。`grade.sh` 直接执行 `qemu-system-riscv64`，因此运行前要确认这个命令实际对应的程序；只设置 Makefile 的 `QEMU` 变量未必会改变评分脚本的选择。
+测试结果如下：
 
-完成三个用例后，还需保留输出次数和关机结果。最终总分以小组实际运行记录为准。
+<p align="center">
+  <img src="images/member3/test1.png" alt="test1" width="600">
+</p>
+
+<p align="center">
+  <img src="images/member3/realtest2.png" alt="test2" width="600">
+</p>
+
+<p align="center">
+  <img src="images/member3/test3.png" alt="test3" width="600">
+</p>
 
 ---
 
@@ -827,6 +1293,11 @@ GDB 中最直观的一次观察是：第一次进入时 `ticks=0`，到 `__trapr
 
 #### 3号成员：张旗庭 2413788
 
+通过本次实验，我对操作系统处理中断和异常的过程有了更加具体的认识。通过阅读 `trap.c` 和 `trapentry.S`，我逐渐明确了 Trap 从硬件触发到软件处理、再返回原执行流的整个过程，也认识到硬件提供的异常机制需要与操作系统的软件处理逻辑相互配合。
+
+时钟中断通常是异步发生的，处理完成后可以返回原来的执行位置；而断点异常和非法指令异常与当前执行的指令直接相关，如果不调整返回地址，就可能反复触发相同的异常。因此，在处理这两类异常时，需要根据实际指令长度更新 tf->epc。
+我也进一步理解了 TrapFrame、`sepc` 和 PC 之间的关系。`tf->epc` 是保存在内存中的异常返回地址，异常处理函数可以修改它，但这并不会立即改变 CPU 的执行位置。只有经过 `RESTORE_ALL` 将更新后的地址恢复到 `sepc`，再执行 `sret`，处理器才能从正确的位置继续运行。实际观察到16位断点异常的 EPC 增加2字节、32位非法指令异常的 EPC 增加4字节，并最终成功返回，让我对处理器上下文恢复机制有了更加直观的理解。
+
 ### 6.2 AI 协作开发的经验
 
 #### 1号成员：张懿鸾 2413669
@@ -848,6 +1319,14 @@ GDB 中最直观的一次观察是：第一次进入时 `ticks=0`，到 `__trapr
 最后，我把修改范围和 GDB 观察结果放在一起检查。真实时钟触发、人工修改原因码和完整评分分别验证不同内容，报告里的结论也要与实际记录对应。AI 能帮助解释代码和安排调试步骤，最终仍需要自己执行、观察并反馈结果，才能判断问题是否解决。
 
 #### 3号成员：张旗庭 2413788
+
+我先使用 ChatGPT 梳理异常处理模块的任务和相关接口，再通过 Codex 阅读项目源码并生成 `exception_handler()`。在设计提示词时，我明确了需要实现的异常类型、指令长度判断、EPC 更新方式以及函数的输入输出要求，同时限定 AI 只修改自己负责的代码区域，不影响其他成员的实现。
+
+Codex 最终完成了异常处理函数的实现，并进行了初步编译和隔离测试，但当时由于执行环境未正确识别 RISC-V 交叉编译器，没有完成完整内核验证。随后我在 WSL 中检查工具链，整合小组代码并重新编译，通过 QEMU 和 `make grade` 验证了实际运行结果。这让我认识到，AI 生成代码只是开发过程的一部分，仍然需要结合真实环境检查其正确性。
+
+GDB 调试也是本次 AI 协作中比较有收获的环节。最初按照 AI 提供的方法使用 `finish` 检查 EPC 更新，但由于编译优化和断点位置的影响，没有观察到预期的变化。之后改用硬件监视点直接观察 `tf->epc` 的修改，成功验证了返回地址更新过程，并进一步通过单步调试确认 `sepc` 恢复和 `sret` 返回。这个过程说明，AI 提供的调试方案不一定能够直接得到预期结果，需要结合实际输出不断调整，而不能只依赖 AI 对结果的判断。
+
+总体而言，相比直接接受 AI 给出的实现，我认为更重要的是能够理解关键代码的作用，并根据真实的实验现象判断其是否正确。AI 提高了源码分析和问题排查的效率，而自己对实验原理、运行过程和测试结果的理解仍然是完成实验的重要基础。
 
 ### 6.3 共同部分：实验知识点与操作系统原理的对应
 
