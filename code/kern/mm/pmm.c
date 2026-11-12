@@ -330,12 +330,48 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
 }
 
 //LAB4 function1 YOUR CODE
+void page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep == NULL || !(*ptep & PTE_V))
+    {
+        return;
+    }
 
+    struct Page *page = pte2page(*ptep);
+    *ptep = 0;
+    tlb_invalidate(pgdir, la);
 
+    if (page_ref_dec(page) == 0)
+    {
+        free_page(page);
+    }
+}
 
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
+{
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL)
+    {
+        return -E_NO_MEM;
+    }
 
+    if (*ptep & PTE_V)
+    {
+        if (pte2page(*ptep) == page)
+        {
+            *ptep = pte_create(page2ppn(page), perm);
+            tlb_invalidate(pgdir, la);
+            return 0;
+        }
+        page_remove(pgdir, la);
+    }
 
-
+    page_ref_inc(page);
+    *ptep = pte_create(page2ppn(page), perm);
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
 
 // invalidate a TLB entry, but only if the page tables being
 // edited are the ones currently in use by the processor.
