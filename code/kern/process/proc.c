@@ -222,3 +222,35 @@ init_main(void *arg)
 
 
 //LAB4 function3 YOUR CODE
+
+void
+proc_run(struct proc_struct *proc)
+{
+    if (proc == current)
+    {
+        return;
+    }
+
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    struct proc_struct *prev = current;
+    current = proc;
+
+    // pgdir is the physical address of the Sv39 root page table.
+    write_csr(satp, 0x8000000000000000UL | (proc->pgdir >> RISCV_PGSHIFT));
+    flush_tlb();
+    switch_to(&prev->context, &proc->context);
+    local_intr_restore(intr_flag);
+}
+
+void
+cpu_idle(void)
+{
+    while (1)
+    {
+        if (current->need_resched)
+        {
+            schedule();
+        }
+    }
+}
