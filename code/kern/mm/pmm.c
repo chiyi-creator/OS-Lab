@@ -329,7 +329,7 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
     return NULL;
 }
 
-//LAB4 function1 YOUR CODE
+//LAB4 function1 2413669
 void page_remove(pde_t *pgdir, uintptr_t la)
 {
     pte_t *ptep = get_pte(pgdir, la, 0);

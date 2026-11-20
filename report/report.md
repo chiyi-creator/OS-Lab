@@ -1812,9 +1812,144 @@ pte_t *ptep = get_pte(pgdir, la, 1);
 
 当前实验暂时保留了原有的 `get_pte()` 实现，因为现有接口已经能够满足 `page_insert()` 和 `page_remove()` 的调用需求。
 
-## 五、gdb 调试
+## 五、GDB 调试
 
 ### 5.1 1号成员测试与验证
+
+**负责人：张懿鸾（2413669）**
+
+本成员主要负责虚拟内存页操作模块，因此 GDB 调试主要针对 `kern/mm/pmm.c` 中实现的 `page_insert()` 和 `page_remove()` 两个函数，重点验证页表映射建立、已有映射替换、物理页引用计数维护以及页面释放等操作。
+
+#### （1）GDB 调试环境与断点设置
+
+使用 RISC-V 交叉编译工具链构建内核，通过 QEMU 启动内核的 GDB 调试模式，并使用 GDB 连接 QEMU 远程调试端口。
+
+首先设置目标架构为 RV64，连接远程调试目标，并在两个待验证函数处设置断点：
+
+```gdb
+set architecture riscv:rv64
+set pagination off
+target remote localhost:1234
+
+break page_insert
+break page_remove
+
+info breakpoints
+continue
+```
+
+成功设置断点后，GDB 可以在内核执行到对应函数时自动暂停，便于观察函数参数、局部变量及关键语句的执行情况。
+
+![GDB连接与断点设置](images/lab4-gdb-01-page-insert-entry.png)
+
+#### （2）page_insert() 函数调试
+
+首先观察 `page_insert()` 首次建立虚拟地址映射的过程。
+
+通过 `info args` 查看函数参数，首次进入时：
+
+- `la = 0`，表示待映射的虚拟地址为 0。
+- `perm = 0`，表示本次映射没有额外设置权限标志。
+- `page->ref = 0`，表示该物理页面当前尚未建立页表映射。
+
+随后使用 `next` 逐步执行，观察 `get_pte()` 获取页表项、`page_ref_inc()` 增加引用计数以及 `pte_create()` 创建页表项的过程。
+
+执行完成后，得到：
+
+```text
+page->ref = 1
+*ptep = 0x20103801
+```
+
+说明物理页面引用计数成功增加，页表项也成功建立。
+
+随后继续执行程序，观察已有映射的替换过程。当再次调用 `page_insert()` 时，目标虚拟地址为 `4096`，但本次传入的物理页面与原映射不同。
+
+通过 GDB 查看得到：
+
+```text
+la = 4096
+perm = 0
+*ptep = 0x20104415
+page->ref = 1
+```
+
+说明目标地址已经存在有效映射，且待插入的物理页面仍被另一虚拟地址引用一次。程序将进入旧映射删除流程，调用 `page_remove()` 释放原有映射所占用的引用。
+
+![page_insert映射替换调试](images/lab4-gdb-02-page-insert-replacement.png)
+
+#### （3）page_remove() 函数调试
+
+在 `page_remove()` 处命中断点后，首先通过 `info args` 和 `bt` 查看函数参数及调用栈。
+
+调试结果表明：
+
+```text
+page_remove(pgdir=0xffffffffc0208000, la=4096)
+
+调用关系：
+page_remove()
+    <- page_insert()
+        <- check_pgdir()
+            <- pmm_init()
+```
+
+由此确认，`page_remove()` 是在 `page_insert()` 替换已有映射时被调用的。
+
+随后逐步执行函数，观察原有页表项及物理页面引用计数的变化：
+
+```text
+原始 PTE：
+*ptep = 0x20104415
+
+原物理页面引用计数：
+page->ref = 1
+```
+
+执行：
+
+```c
+*ptep = 0;
+tlb_invalidate(pgdir, la);
+```
+
+之后，原有页表项被清零，完成旧虚拟地址映射的解除。
+
+继续执行引用计数递减操作：
+
+```c
+if (page_ref_dec(page) == 0)
+{
+    free_page(page);
+}
+```
+
+GDB 观察到：
+
+```text
+page->ref = 0
+*ptep = 0x0
+```
+
+说明旧映射已经清除，物理页面引用计数正确递减至 0，程序随后进入 `free_page()`，将页面归还给 Best-Fit 物理内存分配器。
+
+![page_remove函数调试](images/lab4-gdb-03-page-remove.png)
+
+#### （4）调试结果分析
+
+通过上述 GDB 单步调试，验证了两个函数的关键执行过程：
+
+1. `page_insert()` 能够通过 `get_pte()` 查找或创建页表项，并正确建立新的虚拟地址映射。
+2. 新建映射时，物理页面引用计数能够正确增加。
+3. 当目标虚拟地址已经映射到其他物理页面时，能够调用 `page_remove()` 清除原有映射。
+4. `page_remove()` 能够正确清零页表项，并在修改页表后执行 TLB 失效操作。
+5. 删除映射时，物理页面引用计数能够正确递减；当引用计数归零时，调用 `free_page()` 释放物理页面。
+
+调试过程中，在单步执行 `free_page()` 时，GDB 进一步进入了 Best-Fit 分配器的 `best_free_pages()` 函数，调试上下文随之发生变化，因此原函数的部分局部变量不再能够直接查看。这属于正常的函数调用与调试上下文切换现象。
+
+结合后续 `check_pgdir()` 断言检查以及 `make grade` 自动评分结果，虚拟内存页操作模块的相关测试全部通过。
+
+**最终验证结果：** `page_insert()` 和 `page_remove()` 的核心执行逻辑符合预期，PMM 自动测试通过。
 
 ### 5.2 2号成员测试与验证
 
