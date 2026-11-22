@@ -24,3 +24,40 @@ void wakeup_proc(struct proc_struct *proc)
 }
 
 //lab4 请补充你在lab4中的代码
+
+//lab4 function3 2413669
+void
+schedule(void)
+{
+    bool intr_flag;
+    list_entry_t *last, *le;
+    struct proc_struct *next = NULL;
+
+    local_intr_save(intr_flag);
+    current->need_resched = 0;
+    last = (current == idleproc) ? &proc_list : &current->list_link;
+    le = last;
+    do
+    {
+        le = list_next(le);
+        if (le != &proc_list)
+        {
+            next = le2proc(le, list_link);
+            if (next->state == PROC_RUNNABLE)
+            {
+                break;
+            }
+        }
+    } while (le != last);
+
+    if (next == NULL || next->state != PROC_RUNNABLE)
+    {
+        next = idleproc;
+    }
+    next->runs++;
+    if (next != current)
+    {
+        proc_run(next);
+    }
+    local_intr_restore(intr_flag);
+}

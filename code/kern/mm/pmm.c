@@ -432,7 +432,41 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
 //lab5 function3 YOUR CODE 
 
 
-//lab4 请补充你在lab4中的代码
+//lab4 function1 2413669
+
+void page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep != NULL)
+    {
+        page_remove_pte(pgdir, la, ptep);
+    }
+}
+
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
+{
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL)
+    {
+        return -E_NO_MEM;
+    }
+
+    if (*ptep & PTE_V)
+    {
+        if (pte2page(*ptep) == page)
+        {
+            *ptep = pte_create(page2ppn(page), perm);
+            tlb_invalidate(pgdir, la);
+            return 0;
+        }
+        page_remove(pgdir, la);
+    }
+
+    page_ref_inc(page);
+    *ptep = pte_create(page2ppn(page), perm);
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
 
 
 // invalidate a TLB entry, but only if the page tables being
