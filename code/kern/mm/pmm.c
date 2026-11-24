@@ -5,6 +5,7 @@
 #include <memlayout.h>
 #include <mmu.h>
 #include <pmm.h>
+#include <proc.h>
 #include <sbi.h>
 #include <dtb.h>
 #include <stdio.h>
@@ -611,15 +612,137 @@ static void check_boot_pgdir(void)
     cprintf("check_boot_pgdir() succeeded!\n");
 }
 
-// perm2str - use string 'u,r,w,-' to present the permission
+// perm2str - use string 'u,r,w,x,-' to present the permission
 static const char *perm2str(int perm)
 {
-    static char str[4];
+    static char str[5];
     str[0] = (perm & PTE_U) ? 'u' : '-';
-    str[1] = 'r';
+    str[1] = (perm & PTE_R) ? 'r' : '-';
     str[2] = (perm & PTE_W) ? 'w' : '-';
-    str[3] = '\0';
+    str[3] = (perm & PTE_X) ? 'x' : '-';
+    str[4] = '\0';
     return str;
+}
+
+// 2413669(Lab5): read-only Sv39 traversal for print_pgdir().
+static uintptr_t canonical_sv39(uintptr_t va)
+{
+    const uintptr_t mask = ((uintptr_t)1 << 39) - 1;
+    const uintptr_t sign = (uintptr_t)1 << (39 - 1);
+
+    va &= mask;
+    if (va & sign)
+    {
+        va |= ~mask;
+    }
+    return va;
+}
+
+static bool valid_page_table_pa(uintptr_t pa)
+{
+    ppn_t ppn = PPN(pa);
+    return PGOFF(pa) == 0 && ppn >= nbase && ppn < npage;
+}
+
+static const char *pgdir_level_size(int level)
+{
+    if (level == 2)
+    {
+        return "1 GiB";
+    }
+    if (level == 1)
+    {
+        return "2 MiB";
+    }
+    return "4 KiB";
+}
+
+static void print_pgdir_level(pde_t *table, int level, uintptr_t base)
+{
+    for (size_t i = 0; i < NPTEENTRY; i++)
+    {
+        pte_t entry = table[i];
+        uintptr_t va = canonical_sv39(
+            base | ((uintptr_t)i << (PTXSHIFT + level * 9)));
+
+        if (!(entry & PTE_V))
+        {
+            continue;
+        }
+
+        if (entry & (PTE_R | PTE_W | PTE_X))
+        {
+            uintptr_t size = (uintptr_t)1 << (PTXSHIFT + level * 9);
+            uintptr_t end = va + size - 1;
+            cprintf("  va [0x%016lx, 0x%016lx] pa 0x%016lx size %s perm %s\n",
+                    (unsigned long)va, (unsigned long)end,
+                    (unsigned long)PTE_ADDR(entry),
+                    pgdir_level_size(level), perm2str(entry));
+            continue;
+        }
+
+        if (level > 0)
+        {
+            uintptr_t next_pa = PTE_ADDR(entry);
+            if (!valid_page_table_pa(next_pa))
+            {
+                cprintf("  invalid page table entry at 0x%016lx\n",
+                        (unsigned long)va);
+                continue;
+            }
+            print_pgdir_level((pde_t *)KADDR(next_pa), level - 1, va);
+        }
+    }
+}
+
+void print_pgdir(void)
+{
+    uintptr_t root_pa;
+    pde_t *pgdir;
+
+    if (current != NULL)
+    {
+        root_pa = current->pgdir;
+        if (!valid_page_table_pa(root_pa))
+        {
+            cprintf("print_pgdir: invalid current pgdir 0x%016lx\n",
+                    (unsigned long)root_pa);
+            return;
+        }
+
+        if (current->mm != NULL && current->mm->pgdir != NULL)
+        {
+            uintptr_t mm_pgdir_va = (uintptr_t)current->mm->pgdir;
+            if (mm_pgdir_va < KERNBASE)
+            {
+                cprintf("print_pgdir: invalid mm pgdir 0x%016lx\n",
+                        (unsigned long)mm_pgdir_va);
+                return;
+            }
+            uintptr_t mm_pgdir_pa = PADDR(current->mm->pgdir);
+            if (mm_pgdir_pa != root_pa)
+            {
+                cprintf("print_pgdir: pgdir mismatch satp=0x%016lx mm=0x%016lx\n",
+                        (unsigned long)root_pa,
+                        (unsigned long)mm_pgdir_pa);
+                return;
+            }
+        }
+    }
+    else
+    {
+        root_pa = boot_pgdir_pa;
+        if (!valid_page_table_pa(root_pa))
+        {
+            cprintf("print_pgdir: invalid boot pgdir 0x%016lx\n",
+                    (unsigned long)root_pa);
+            return;
+        }
+    }
+
+    pgdir = (pde_t *)KADDR(root_pa);
+    cprintf("page directory at %p\n", pgdir);
+    print_pgdir_level(pgdir, 2, 0);
 }
 
 // get_pgtable_items - In [left, right] range of PDT or PT, find a continuous

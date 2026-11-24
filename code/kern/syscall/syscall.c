@@ -161,6 +161,19 @@ sys_kill(uint64_t arg[])
     return do_kill(pid);
 }
 
+// 2413669(Lab5): print the page table used by the current process.
+static int
+sys_pgdir(uint64_t arg[])
+{
+    (void)arg;
+    if (current == NULL)
+    {
+        return -E_INVAL;
+    }
+    print_pgdir();
+    return 0;
+}
+
 static int (*const syscalls[SYS_pgdir + 1])(uint64_t arg[]) = {
     [SYS_exit] = sys_exit,
     [SYS_fork] = sys_fork,
@@ -170,6 +183,7 @@ static int (*const syscalls[SYS_pgdir + 1])(uint64_t arg[]) = {
     [SYS_kill] = sys_kill,
     [SYS_getpid] = sys_getpid,
     [SYS_putc] = sys_putc,
+    [SYS_pgdir] = sys_pgdir,
 };
 
 #define NUM_SYSCALLS        ((sizeof(syscalls)) / (sizeof(syscalls[0])))
