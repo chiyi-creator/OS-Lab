@@ -514,6 +514,18 @@ cpu_idle(void)
     }
 }
 
+// 2413669(Lab5): defer yielding to the Trap return scheduling path.
+int
+do_yield(void)
+{
+    if (current == NULL)
+    {
+        return -E_BAD_PROC;
+    }
+    current->need_resched = 1;
+    return 0;
+}
+
 #define __KERNEL_EXECVE(name, binary, size) ({           \
     cprintf("kernel_execve: pid = %d, name = \"%s\".\n", \
             current->pid, name);                         \
