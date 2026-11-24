@@ -183,6 +183,30 @@ void exception_handler(struct trapframe *tf)
         syscall();
         return;
 
+    case CAUSE_STORE_PAGE_FAULT:
+        // 2413669(Lab5): enter COW handling without advancing the faulting EPC.
+        if (trap_in_kernel(tf))
+        {
+            cprintf("Store page fault in kernel mode at 0x%016lx\n",
+                    (unsigned long)tf->epc);
+            print_trapframe(tf);
+            panic("unhandled kernel store page fault");
+        }
+        if (current == NULL || current->mm == NULL)
+        {
+            cprintf("Store page fault without a user address space\n");
+            print_trapframe(tf);
+            panic("unhandled user store page fault");
+        }
+        if (do_pgfault(current->mm, (uint32_t)tf->cause, tf->tval) != 0)
+        {
+            cprintf("do_pgfault failed for address 0x%016lx\n",
+                    (unsigned long)tf->tval);
+            print_trapframe(tf);
+            panic("store page fault handling failed");
+        }
+        return;
+
     default:
         print_trapframe(tf);
         return;
