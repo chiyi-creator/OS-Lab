@@ -177,6 +177,12 @@ void exception_handler(struct trapframe *tf)
                 (unsigned long)tf->epc);
         break;
 
+    case CAUSE_USER_ECALL:
+        //lab5 function1 2413669 update exception_handler
+        tf->epc += 4;
+        syscall();
+        return;
+
     default:
         print_trapframe(tf);
         return;
@@ -187,7 +193,6 @@ void exception_handler(struct trapframe *tf)
     /* For the target's 16/32-bit instructions, low bits 11 mean 4 bytes. */
     tf->epc += (insn & 0x3) == 0x3 ? 4 : 2;
 
-    //lab5 function1 YOUR CODE update exception_handler
 }
 
 static inline void trap_dispatch(struct trapframe *tf)
